@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from uuid import uuid4
 
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.db.models import Q
 from django.utils import timezone
 
@@ -99,6 +99,12 @@ class BatchService:
         try:
             return Batch.objects.create(**payload)
         except IntegrityError as exc:
+            if cls._is_stale_primary_key_sequence_error(exc):
+                cls._sync_batch_id_sequence()
+                try:
+                    return Batch.objects.create(**payload)
+                except IntegrityError as retry_exc:
+                    raise ConflictApiError("Unable to create batch") from retry_exc
             raise ConflictApiError("Unable to create batch") from exc
 
     @staticmethod
@@ -108,6 +114,24 @@ class BatchService:
         if isinstance(value, date):
             return timezone.make_aware(datetime.combine(value, datetime.min.time()))
         return value
+
+    @staticmethod
+    def _is_stale_primary_key_sequence_error(exc: IntegrityError) -> bool:
+        message = str(exc)
+        return 'duplicate key value violates unique constraint "batches_pkey"' in message
+
+    @staticmethod
+    def _sync_batch_id_sequence() -> None:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT setval(
+                    pg_get_serial_sequence('public.batches', 'id'),
+                    COALESCE((SELECT MAX(id) FROM public.batches), 0),
+                    true
+                )
+                """
+            )
 
     @staticmethod
     def list_batches(*, product_id: int | None, status: str | None, expired_only: bool, page: int, size: int):
