@@ -1,0 +1,12 @@
+[project]
+name = "origin-django"
+version = "0.1.0"
+description = "Django migration of origin_backend backed by Supabase Postgres."
+requires-python = ">=3.12"
+dependencies = [
+    "django>=6.0,<7.0",
+    "djangorestframework>=3.17,<4.0",
+    "django-cors-headers>=4.9,<5.0",
+    "python-dotenv>=1.2,<2.0",
+    "psycopg[binary]>=3.3,<4.0",
+]
