@@ -4,13 +4,27 @@ from inventory.schemas import (
     BatchCreateSerializer,
     BatchListQuerySerializer,
     BatchOutputSerializer,
+    BatchStatusUpdateSerializer,
+    BatchUpdateSerializer,
     CategoryQuerySerializer,
     ProductCreateSerializer,
+    ProductBatchListQuerySerializer,
     ProductListQuerySerializer,
     ProductOutputSerializer,
     ProductUpdateSerializer,
 )
 from inventory.services import BatchService, ProductService
+
+
+def paginated_payload(*, items, page: int, size: int, total: int):
+    return {
+        "items": items,
+        "pagination": {
+            "page": page,
+            "size": size,
+            "total": total,
+        },
+    }
 
 
 class ProductCollectionView(ServiceAPIView):
@@ -24,12 +38,12 @@ class ProductCollectionView(ServiceAPIView):
         )
         serializer = ProductOutputSerializer(products, many=True)
         return success_response(
-            serializer.data,
-            meta={
-                "page": query.validated_data["page"],
-                "size": query.validated_data["size"],
-                "total": total,
-            },
+            paginated_payload(
+                items=serializer.data,
+                page=query.validated_data["page"],
+                size=query.validated_data["size"],
+                total=total,
+            ),
         )
 
     def post(self, request):
@@ -40,6 +54,10 @@ class ProductCollectionView(ServiceAPIView):
 
 
 class ProductDetailView(ServiceAPIView):
+    def get(self, request, product_id: int):
+        product = ProductService.get_product(product_id)
+        return success_response(ProductOutputSerializer(product).data)
+
     def patch(self, request, product_id: int):
         serializer = ProductUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -51,12 +69,40 @@ class ProductDetailView(ServiceAPIView):
         return success_response(result)
 
 
+class ProductBarcodeDetailView(ServiceAPIView):
+    def get(self, request, barcode: str):
+        product = ProductService.get_product_by_barcode(barcode)
+        return success_response(ProductOutputSerializer(product).data)
+
+
 class ProductCategoriesView(ServiceAPIView):
     def get(self, request):
         query = CategoryQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         categories = ProductService.list_categories(query.validated_data.get("search"))
-        return success_response(categories)
+        return success_response({"items": categories, "pagination": None})
+
+
+class ProductBatchCollectionView(ServiceAPIView):
+    def get(self, request, product_id: int):
+        query = ProductBatchListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        batches, total = BatchService.list_batches(
+            product_id=product_id,
+            status=query.validated_data.get("status"),
+            expired_only=query.validated_data["expired_only"],
+            page=query.validated_data["page"],
+            size=query.validated_data["size"],
+        )
+        serializer = BatchOutputSerializer(batches, many=True)
+        return success_response(
+            paginated_payload(
+                items=serializer.data,
+                page=query.validated_data["page"],
+                size=query.validated_data["size"],
+                total=total,
+            ),
+        )
 
 
 class BatchCollectionView(ServiceAPIView):
@@ -72,12 +118,12 @@ class BatchCollectionView(ServiceAPIView):
         )
         serializer = BatchOutputSerializer(batches, many=True)
         return success_response(
-            serializer.data,
-            meta={
-                "page": query.validated_data["page"],
-                "size": query.validated_data["size"],
-                "total": total,
-            },
+            paginated_payload(
+                items=serializer.data,
+                page=query.validated_data["page"],
+                size=query.validated_data["size"],
+                total=total,
+            ),
         )
 
     def post(self, request):
@@ -85,3 +131,27 @@ class BatchCollectionView(ServiceAPIView):
         serializer.is_valid(raise_exception=True)
         batch = BatchService.create_batch(serializer.validated_data)
         return success_response(BatchOutputSerializer(batch).data, status_code=201)
+
+
+class BatchDetailView(ServiceAPIView):
+    def get(self, request, batch_id: int):
+        batch = BatchService.get_batch(batch_id)
+        return success_response(BatchOutputSerializer(batch).data)
+
+    def patch(self, request, batch_id: int):
+        serializer = BatchUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        batch = BatchService.update_batch(batch_id, serializer.validated_data)
+        return success_response(BatchOutputSerializer(batch).data)
+
+    def delete(self, request, batch_id: int):
+        result = BatchService.delete_batch(batch_id)
+        return success_response(result)
+
+
+class BatchStatusView(ServiceAPIView):
+    def patch(self, request, batch_id: int):
+        serializer = BatchStatusUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        batch = BatchService.update_batch_status(batch_id, serializer.validated_data["status"])
+        return success_response(BatchOutputSerializer(batch).data)

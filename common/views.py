@@ -17,12 +17,5 @@ class ServiceAPIView(APIView):
         if isinstance(exc, ApiError):
             return error_response(code=exc.code, message=exc.message, status_code=exc.status_code)
         if isinstance(exc, DRFValidationError):
-            detail = exc.detail
-            if isinstance(detail, dict):
-                message = "; ".join(f"{key}: {value[0] if isinstance(value, list) else value}" for key, value in detail.items())
-            elif isinstance(detail, list):
-                message = "; ".join(str(item) for item in detail)
-            else:
-                message = str(detail)
-            return error_response(code="validation_error", message=message, status_code=400)
+            return error_response(code=4001, message="validation_error", status_code=400)
         return super().handle_exception(exc)

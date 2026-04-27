@@ -32,6 +32,13 @@ class ProductUpdateSerializer(serializers.Serializer):
     manufacturer = serializers.CharField(required=False)
 
 
+class ProductBatchListQuerySerializer(serializers.Serializer):
+    status = serializers.CharField(required=False, allow_blank=False)
+    expired_only = serializers.BooleanField(required=False, default=False)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
+
+
 class ProductOutputSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
@@ -67,6 +74,19 @@ class BatchCreateSerializer(serializers.Serializer):
     remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
+class BatchUpdateSerializer(serializers.Serializer):
+    batch_code = serializers.CharField(required=False, allow_blank=False)
+    quantity = serializers.DecimalField(required=False, max_digits=12, decimal_places=2)
+    manufacture_date = serializers.DateField(required=False)
+    expire_date = serializers.DateField(required=False, allow_null=True)
+    status = serializers.CharField(required=False, allow_blank=False)
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class BatchStatusUpdateSerializer(serializers.Serializer):
+    status = serializers.CharField()
+
+
 class ProductSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
@@ -84,7 +104,7 @@ class BatchOutputSerializer(serializers.ModelSerializer):
             "product_id",
             "batch_code",
             "quantity",
-            "received_date",
+            "received_at",
             "manufacture_date",
             "expire_date",
             "status",

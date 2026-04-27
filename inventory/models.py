@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models.functions import Now
 
 
 class Product(models.Model):
@@ -9,8 +10,8 @@ class Product(models.Model):
     location = models.CharField(max_length=255, blank=True, null=True)
     category = models.CharField(max_length=255, blank=True, null=True)
     unit = models.CharField(max_length=255, blank=True, null=True)
-    created_at = models.DateTimeField(blank=True, null=True)
-    updated_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(blank=True, db_default=Now())
+    updated_at = models.DateTimeField(blank=True, db_default=Now())
     manufacturer = models.TextField()
 
     class Meta:
@@ -23,9 +24,9 @@ class Batch(models.Model):
     product = models.ForeignKey(Product, on_delete=models.DO_NOTHING, related_name="batches", db_column="product_id")
     batch_code = models.CharField(max_length=255)
     quantity = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    received_date = models.DateTimeField(blank=True, null=True)
+    received_at = models.DateTimeField(blank=True, db_default=Now())
     manufacture_date = models.DateField(blank=True, null=True)
-    expire_date = models.DateTimeField(blank=True, null=True)
+    expire_date = models.DateField(blank=True, null=True)
     status = models.CharField(max_length=255, blank=True, null=True)
     remarks = models.CharField(max_length=255, blank=True, null=True)
 
