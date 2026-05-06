@@ -2,6 +2,7 @@ from common.responses import success_response
 from common.views import ServiceAPIView
 from inventory.schemas import (
     BatchCreateSerializer,
+    ExpiryAlertQuerySerializer,
     BatchListQuerySerializer,
     BatchOutputSerializer,
     BatchStatusUpdateSerializer,
@@ -131,6 +132,32 @@ class BatchCollectionView(ServiceAPIView):
         serializer.is_valid(raise_exception=True)
         batch = BatchService.create_batch(serializer.validated_data)
         return success_response(BatchOutputSerializer(batch).data, status_code=201)
+
+
+class BatchExpiryAlertsView(ServiceAPIView):
+    def get(self, request):
+        query = ExpiryAlertQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        batches, total = BatchService.list_expiry_alerts(
+            product_id=query.validated_data.get("product_id"),
+            status=query.validated_data.get("status"),
+            category=query.validated_data.get("category"),
+            location=query.validated_data.get("location"),
+            expiry_status=query.validated_data.get("expiry_status"),
+            days_lte=query.validated_data["days_lte"],
+            include_expired=query.validated_data["include_expired"],
+            page=query.validated_data["page"],
+            size=query.validated_data["size"],
+        )
+        serializer = BatchOutputSerializer(batches, many=True)
+        return success_response(
+            paginated_payload(
+                items=serializer.data,
+                page=query.validated_data["page"],
+                size=query.validated_data["size"],
+                total=total,
+            ),
+        )
 
 
 class BatchDetailView(ServiceAPIView):

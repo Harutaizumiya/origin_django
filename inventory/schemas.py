@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from inventory.expiry import VALID_EXPIRY_STATUSES, calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
 from inventory.models import Batch, Product
 
 
@@ -64,6 +65,18 @@ class BatchListQuerySerializer(serializers.Serializer):
     size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
 
 
+class ExpiryAlertQuerySerializer(serializers.Serializer):
+    product_id = serializers.IntegerField(required=False, min_value=1)
+    status = serializers.CharField(required=False, allow_blank=False, default="unopened")
+    category = serializers.CharField(required=False, allow_blank=False)
+    location = serializers.CharField(required=False, allow_blank=False)
+    expiry_status = serializers.ChoiceField(required=False, choices=VALID_EXPIRY_STATUSES)
+    days_lte = serializers.IntegerField(required=False, default=30, min_value=0)
+    include_expired = serializers.BooleanField(required=False, default=True)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
+
+
 class BatchCreateSerializer(serializers.Serializer):
     product_id = serializers.IntegerField(min_value=1)
     batch_code = serializers.CharField(required=False, allow_blank=False)
@@ -96,6 +109,37 @@ class ProductSummarySerializer(serializers.ModelSerializer):
 class BatchOutputSerializer(serializers.ModelSerializer):
     product_id = serializers.IntegerField(source="product.id", read_only=True)
     product = ProductSummarySerializer(read_only=True)
+    days_until_expiry = serializers.SerializerMethodField()
+    expiry_progress = serializers.SerializerMethodField()
+    expiry_status = serializers.SerializerMethodField()
+
+    def get_days_until_expiry(self, obj):
+        return calc_days_until_expiry(self._value(obj, "expire_date"))
+
+    def get_expiry_progress(self, obj):
+        return calc_expiry_progress(
+            self._value(obj, "manufacture_date"),
+            self._product_value(obj, "shelf_life_days"),
+        )
+
+    def get_expiry_status(self, obj):
+        return calc_expiry_status(
+            self._value(obj, "manufacture_date"),
+            self._product_value(obj, "shelf_life_days"),
+        )
+
+    @staticmethod
+    def _value(obj, field):
+        if isinstance(obj, dict):
+            return obj.get(field)
+        return getattr(obj, field, None)
+
+    @classmethod
+    def _product_value(cls, obj, field):
+        product = cls._value(obj, "product")
+        if isinstance(product, dict):
+            return product.get(field)
+        return getattr(product, field, None)
 
     class Meta:
         model = Batch
@@ -109,5 +153,8 @@ class BatchOutputSerializer(serializers.ModelSerializer):
             "expire_date",
             "status",
             "remarks",
+            "days_until_expiry",
+            "expiry_progress",
+            "expiry_status",
             "product",
         ]

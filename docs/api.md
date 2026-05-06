@@ -527,3 +527,89 @@
 
 - 首页：`GET /`
 - 当前没有 `users` 相关 API
+
+## 效期预警补充
+
+### Batch 新增计算字段
+
+批次响应新增以下只读计算字段，不写入数据库：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `days_until_expiry` | integer \| null | 距离 `expire_date` 的剩余天数，过期为负数，无到期日为 `null` |
+| `expiry_progress` | number \| null | 生命周期相对进度，计算公式为 `(today - manufacture_date) / product.shelf_life_days` |
+| `expiry_status` | string | 效期风险状态 |
+
+`expiry_status` 使用相对进度判定：
+
+| 状态 | 条件 | 说明 |
+| --- | --- | --- |
+| `expired` | `expiry_progress > 1.0` | 已过期 |
+| `critical` | `expiry_progress > 0.9` | 生命周期超过 90% |
+| `warning` | `expiry_progress > 0.75` | 生命周期 75% 到 90% |
+| `normal` | `expiry_progress <= 0.75` | 生命周期未超过 75% |
+
+`shelf_life_days = 0` 时视为已过期。`manufacture_date` 是业务必填字段；若历史数据缺失导致无法计算，相应计算字段会防御性返回 `null` / `unknown`，避免接口 500。
+
+### GET `/batches/expiry-alerts`
+
+查询临期/过期批次列表。
+
+请求参数：
+
+- `product_id`：可选，按商品 ID 过滤
+- `status`：可选，默认 `unopened`
+- `category`：可选，按商品分类精确过滤
+- `location`：可选，按商品位置精确过滤
+- `expiry_status`：可选，枚举值为 `expired`、`critical`、`warning`、`normal`
+- `days_lte`：可选，默认 `30`，绝对剩余天数运营窗口
+- `include_expired`：可选，默认 `true`
+- `page`：可选，默认 `1`
+- `size`：可选，默认 `20`，最大 `100`
+
+默认行为：
+
+- 只返回 `status = unopened` 的批次。
+- 只返回生命周期后段状态：`expired`、`critical`、`warning`。
+- 默认运营窗口为 `days_until_expiry <= 30`。
+- `include_expired=false` 时排除已过期批次。
+- 排序优先级：`days_until_expiry ASC`、`expiry_progress DESC`、`id DESC`。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "items": [
+      {
+        "id": 1,
+        "product_id": 14,
+        "batch_code": "BATCH-20260427-12345678",
+        "quantity": "8.50",
+        "received_at": "2026-04-21T11:43:00+08:00",
+        "manufacture_date": "2026-04-01",
+        "expire_date": "2026-04-30",
+        "status": "unopened",
+        "remarks": "示例批次",
+        "days_until_expiry": 3,
+        "expiry_progress": 0.87,
+        "expiry_status": "warning",
+        "product": {
+          "id": 14,
+          "barcode": "6901234567890",
+          "product_name": "示例商品",
+          "unit": "盒",
+          "manufacturer": "示例厂商"
+        }
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "size": 20,
+      "total": 1
+    }
+  }
+}
+```

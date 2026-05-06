@@ -144,3 +144,13 @@ CREATE INDEX IF NOT EXISTS product_category_idx ON product(category);
 
 如需优化商品模糊搜索，可考虑为常用搜索字段增加 PostgreSQL trigram 索引；这属于性能优化，
 不属于当前 model 的硬性结构要求。
+
+## 效期预警索引说明
+
+临期预警接口会按批次状态、到期日、商品 ID 过滤，并按到期日参与排序。由于 `Product` 与 `Batch` 当前均为 `managed = False`，以下索引需要通过数据库维护流程执行，不能依赖 Django migration 自动维护业务表结构。
+
+```sql
+CREATE INDEX IF NOT EXISTS batches_expire_date_idx ON batches(expire_date);
+CREATE INDEX IF NOT EXISTS batches_status_idx ON batches(status);
+CREATE INDEX IF NOT EXISTS batches_product_id_idx ON batches(product_id);
+```
