@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -319,11 +320,17 @@ class InventoryApiTests(SimpleTestCase):
             },
         }
 
-        response = self.client.patch("/api/batches/3", {"quantity": "9.50", "remarks": "updated"}, format="json")
+        response = self.client.patch("/api/batches/3", {"remarks": "updated"}, format="json")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["code"], 0)
         self.assertEqual(response.json()["data"]["remarks"], "updated")
+
+    def test_patch_batch_rejects_direct_quantity_update(self):
+        response = self.client.patch("/api/batches/3", {"quantity": "9.50"}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
 
     @patch("inventory.views.BatchService.update_batch_status")
     def test_patch_batch_status_returns_standard_shape(self, mock_update_batch_status):
@@ -445,6 +452,131 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"code": 4041, "message": "not_found", "data": None})
+
+    @patch("inventory.views.BatchOperationService.create_operation")
+    def test_create_batch_operation_returns_operation_and_batch_summary(self, mock_create_operation):
+        mock_create_operation.return_value = (
+            SimpleNamespace(
+                id=7,
+                batch_id=3,
+                operation_type="loss",
+                quantity=Decimal("2.00"),
+                quantity_after=Decimal("6.50"),
+                remarks="broken package",
+                created_at=None,
+            ),
+            SimpleNamespace(id=3, quantity=Decimal("6.50")),
+        )
+
+        response = self.client.post(
+            "/api/batches/3/operations",
+            {
+                "operation_type": "loss",
+                "quantity": "2.00",
+                "remarks": "broken package",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.json(),
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "operation": {
+                        "id": 7,
+                        "batch_id": 3,
+                        "operation_type": "loss",
+                        "quantity": "2.00",
+                        "quantity_after": "6.50",
+                        "remarks": "broken package",
+                        "created_at": None,
+                    },
+                    "batch": {
+                        "id": 3,
+                        "quantity": "6.50",
+                    },
+                },
+            },
+        )
+        mock_create_operation.assert_called_once()
+        self.assertEqual(mock_create_operation.call_args.args[0], 3)
+        self.assertEqual(mock_create_operation.call_args.args[1]["quantity"], Decimal("2.00"))
+
+    @patch("inventory.views.BatchOperationService.list_operations")
+    def test_list_batch_operations_returns_paginated_history(self, mock_list_operations):
+        mock_list_operations.return_value = (
+            [
+                SimpleNamespace(
+                    id=7,
+                    batch_id=3,
+                    operation_type="loss",
+                    quantity=Decimal("2.00"),
+                    quantity_after=Decimal("6.50"),
+                    remarks="broken package",
+                    created_at=None,
+                )
+            ],
+            1,
+        )
+
+        response = self.client.get(
+            "/api/batches/3/operations",
+            {
+                "operation_type": "loss",
+                "page": 2,
+                "size": 5,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["pagination"], {"page": 2, "size": 5, "total": 1})
+        self.assertEqual(response.json()["data"]["items"][0]["quantity_after"], "6.50")
+        mock_list_operations.assert_called_once_with(batch_id=3, operation_type="loss", page=2, size=5)
+
+    def test_create_batch_operation_rejects_invalid_operation_type(self):
+        response = self.client.post(
+            "/api/batches/3/operations",
+            {
+                "operation_type": "unknown",
+                "quantity": "2.00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
+
+    def test_create_batch_operation_rejects_non_positive_quantity(self):
+        response = self.client.post(
+            "/api/batches/3/operations",
+            {
+                "operation_type": "add",
+                "quantity": "0",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
+
+    @patch("inventory.views.BatchOperationService.create_operation")
+    def test_create_batch_operation_translates_conflict(self, mock_create_operation):
+        mock_create_operation.side_effect = ConflictApiError("Insufficient batch quantity")
+
+        response = self.client.post(
+            "/api/batches/3/operations",
+            {
+                "operation_type": "deduct",
+                "quantity": 99,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"code": 4091, "message": "conflict", "data": None})
 
     def test_validation_error_returns_business_code_and_stable_message(self):
         response = self.client.post(

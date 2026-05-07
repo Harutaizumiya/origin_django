@@ -4,7 +4,11 @@ from inventory.schemas import (
     BatchCreateSerializer,
     ExpiryAlertQuerySerializer,
     BatchListQuerySerializer,
+    BatchOperationCreateSerializer,
+    BatchOperationListQuerySerializer,
+    BatchOperationOutputSerializer,
     BatchOutputSerializer,
+    BatchQuantitySummarySerializer,
     BatchStatusUpdateSerializer,
     BatchUpdateSerializer,
     CategoryQuerySerializer,
@@ -14,7 +18,7 @@ from inventory.schemas import (
     ProductOutputSerializer,
     ProductUpdateSerializer,
 )
-from inventory.services import BatchService, ProductService
+from inventory.services import BatchOperationService, BatchService, ProductService
 
 
 def paginated_payload(*, items, page: int, size: int, total: int):
@@ -157,6 +161,39 @@ class BatchExpiryAlertsView(ServiceAPIView):
                 size=query.validated_data["size"],
                 total=total,
             ),
+        )
+
+
+class BatchOperationCollectionView(ServiceAPIView):
+    def get(self, request, batch_id: int):
+        query = BatchOperationListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        operations, total = BatchOperationService.list_operations(
+            batch_id=batch_id,
+            operation_type=query.validated_data.get("operation_type"),
+            page=query.validated_data["page"],
+            size=query.validated_data["size"],
+        )
+        serializer = BatchOperationOutputSerializer(operations, many=True)
+        return success_response(
+            paginated_payload(
+                items=serializer.data,
+                page=query.validated_data["page"],
+                size=query.validated_data["size"],
+                total=total,
+            ),
+        )
+
+    def post(self, request, batch_id: int):
+        serializer = BatchOperationCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        operation, batch = BatchOperationService.create_operation(batch_id, serializer.validated_data)
+        return success_response(
+            {
+                "operation": BatchOperationOutputSerializer(operation).data,
+                "batch": BatchQuantitySummarySerializer(batch).data,
+            },
+            status_code=201,
         )
 
 

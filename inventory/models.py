@@ -33,3 +33,21 @@ class Batch(models.Model):
     class Meta:
         managed = False
         db_table = "batches"
+
+
+class BatchOperation(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    batch = models.ForeignKey(Batch, on_delete=models.DO_NOTHING, related_name="operations", db_column="batch_id")
+    operation_type = models.CharField(max_length=20)
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    quantity_after = models.DecimalField(max_digits=12, decimal_places=2)
+    remarks = models.CharField(max_length=255, blank=True, null=True)
+    created_at = models.DateTimeField(blank=True, db_default=Now())
+
+    class Meta:
+        managed = False
+        db_table = "batch_operations"
+        indexes = [
+            models.Index(fields=["batch", "-created_at", "-id"], name="batch_operations_batch_created_idx"),
+            models.Index(fields=["operation_type"], name="batch_operations_type_idx"),
+        ]

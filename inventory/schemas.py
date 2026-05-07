@@ -1,7 +1,12 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from inventory.expiry import VALID_EXPIRY_STATUSES, calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
-from inventory.models import Batch, Product
+from inventory.models import Batch, BatchOperation, Product
+
+
+VALID_BATCH_OPERATION_TYPES = ("add", "loss", "deduct")
 
 
 class ProductListQuerySerializer(serializers.Serializer):
@@ -89,15 +94,31 @@ class BatchCreateSerializer(serializers.Serializer):
 
 class BatchUpdateSerializer(serializers.Serializer):
     batch_code = serializers.CharField(required=False, allow_blank=False)
-    quantity = serializers.DecimalField(required=False, max_digits=12, decimal_places=2)
     manufacture_date = serializers.DateField(required=False)
     expire_date = serializers.DateField(required=False, allow_null=True)
     status = serializers.CharField(required=False, allow_blank=False)
     remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
+    def validate(self, attrs):
+        if "quantity" in self.initial_data:
+            raise serializers.ValidationError({"quantity": "Use batch operations to change quantity."})
+        return attrs
+
 
 class BatchStatusUpdateSerializer(serializers.Serializer):
     status = serializers.CharField()
+
+
+class BatchOperationCreateSerializer(serializers.Serializer):
+    operation_type = serializers.ChoiceField(choices=VALID_BATCH_OPERATION_TYPES)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class BatchOperationListQuerySerializer(serializers.Serializer):
+    operation_type = serializers.ChoiceField(required=False, choices=VALID_BATCH_OPERATION_TYPES)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
 
 
 class ProductSummarySerializer(serializers.ModelSerializer):
@@ -158,3 +179,15 @@ class BatchOutputSerializer(serializers.ModelSerializer):
             "expiry_status",
             "product",
         ]
+
+
+class BatchQuantitySummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Batch
+        fields = ["id", "quantity"]
+
+
+class BatchOperationOutputSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BatchOperation
+        fields = ["id", "batch_id", "operation_type", "quantity", "quantity_after", "remarks", "created_at"]

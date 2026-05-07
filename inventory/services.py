@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 from django.db import DatabaseError, IntegrityError, connection, transaction
@@ -9,7 +10,7 @@ from django.utils import timezone
 
 from common.exceptions import ConflictApiError, NotFoundApiError
 from inventory.expiry import ALERT_EXPIRY_STATUSES, calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
-from inventory.models import Batch, Product
+from inventory.models import Batch, BatchOperation, Product
 
 
 def _raise_conflict(detail: str, exc: Exception) -> None:
@@ -293,3 +294,67 @@ class BatchService:
             return filtered_batches[offset : offset + size], total
         except DatabaseError as exc:
             _raise_conflict("Unable to list expiry alerts", exc)
+
+
+class BatchOperationService:
+    decrease_operation_types = {"loss", "deduct"}
+
+    @classmethod
+    def create_operation(cls, batch_id: int, data: dict):
+        try:
+            with transaction.atomic():
+                batch = Batch.objects.select_for_update().get(pk=batch_id)
+                if batch.quantity is None:
+                    raise ConflictApiError("Batch quantity is unavailable")
+
+                quantity = data["quantity"]
+                quantity_after = cls._apply_quantity(
+                    current_quantity=batch.quantity,
+                    operation_type=data["operation_type"],
+                    quantity=quantity,
+                )
+                if quantity_after < Decimal("0"):
+                    raise ConflictApiError("Insufficient batch quantity")
+
+                batch.quantity = quantity_after
+                batch.save(update_fields=["quantity"])
+                operation = BatchOperation.objects.create(
+                    batch=batch,
+                    operation_type=data["operation_type"],
+                    quantity=quantity,
+                    quantity_after=quantity_after,
+                    remarks=data.get("remarks"),
+                )
+        except Batch.DoesNotExist as exc:
+            raise NotFoundApiError(f"Batch {batch_id} not found") from exc
+        except IntegrityError as exc:
+            raise ConflictApiError("Unable to create batch operation") from exc
+        except DatabaseError as exc:
+            _raise_conflict("Unable to create batch operation", exc)
+
+        operation.refresh_from_db(fields=["created_at"])
+        return operation, batch
+
+    @classmethod
+    def _apply_quantity(cls, *, current_quantity: Decimal, operation_type: str, quantity: Decimal) -> Decimal:
+        if operation_type == "add":
+            return current_quantity + quantity
+        if operation_type in cls.decrease_operation_types:
+            return current_quantity - quantity
+        raise ConflictApiError("Unsupported batch operation")
+
+    @staticmethod
+    def list_operations(*, batch_id: int, operation_type: str | None, page: int, size: int):
+        try:
+            Batch.objects.only("id").get(pk=batch_id)
+            queryset = BatchOperation.objects.filter(batch_id=batch_id).order_by("-created_at", "-id")
+            if operation_type:
+                queryset = queryset.filter(operation_type=operation_type)
+
+            total = queryset.count()
+            offset = (page - 1) * size
+            return list(queryset[offset : offset + size]), total
+        except Batch.DoesNotExist as exc:
+            raise NotFoundApiError(f"Batch {batch_id} not found") from exc
+        except DatabaseError as exc:
+            _raise_conflict("Unable to list batch operations", exc)

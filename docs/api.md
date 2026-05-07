@@ -125,6 +125,18 @@
 | `remarks` | string \| null | 备注 |
 | `product` | ProductSummary | 商品摘要 |
 
+### BatchOperation
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | integer | 操作记录 ID |
+| `batch_id` | integer | 关联批次 ID |
+| `operation_type` | string | 操作类型：`add`、`loss`、`deduct` |
+| `quantity` | string | 本次操作数量，始终为正数 |
+| `quantity_after` | string | 操作完成后的批次数量快照 |
+| `remarks` | string \| null | 备注 |
+| `created_at` | string | 操作时间 |
+
 ### Pagination
 
 | 字段 | 类型 | 说明 |
@@ -461,11 +473,14 @@
 
 可更新字段：
 - `batch_code`
-- `quantity`
 - `manufacture_date`
 - `expire_date`
 - `status`
 - `remarks`
+
+说明：
+- 批次数量不能通过该接口直接更新；数量变更必须使用
+  `POST /batches/{batch_id}/operations`。
 
 成功响应：
 - `data`：`Batch`
@@ -474,6 +489,119 @@
 - `400 / 4001 / validation_error`
 - `404 / 4041 / not_found`
 - `409 / 4091 / conflict`
+
+### POST `/batches/{batch_id}/operations`
+
+创建一条批次操作记录，并同步更新对应批次的 `quantity`。该接口不读取、不判断、不修改
+批次 `status`。
+
+路径参数：
+- `batch_id`：批次 ID
+
+请求体：
+
+```json
+{
+  "operation_type": "loss",
+  "quantity": "2.00",
+  "remarks": "包装破损"
+}
+```
+
+请求字段：
+- `operation_type`：必填，枚举值为 `add`、`loss`、`deduct`
+- `quantity`：必填，可传数字或字符串，必须大于 `0`
+- `remarks`：可选，可为 `null` 或空字符串
+
+业务规则：
+- `add`：`batch.quantity += quantity`
+- `loss` / `deduct`：`batch.quantity -= quantity`
+- 扣减后小于 `0` 时拒绝，返回 `409 / 4091 / conflict`
+- 历史数据中 `batch.quantity` 为 `null` 时拒绝，返回 `409 / 4091 / conflict`
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "operation": {
+      "id": 1,
+      "batch_id": 10,
+      "operation_type": "loss",
+      "quantity": "2.00",
+      "quantity_after": "6.50",
+      "remarks": "包装破损",
+      "created_at": "2026-05-07T14:30:00+08:00"
+    },
+    "batch": {
+      "id": 10,
+      "quantity": "6.50"
+    }
+  }
+}
+```
+
+返回字段结构：
+- `data.operation`：`BatchOperation`
+- `data.batch`：批次数量摘要
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `404 / 4041 / not_found`
+- `409 / 4091 / conflict`
+
+### GET `/batches/{batch_id}/operations`
+
+查询某个批次的操作历史。
+
+路径参数：
+- `batch_id`：批次 ID
+
+请求参数：
+- `operation_type`：可选，枚举值为 `add`、`loss`、`deduct`
+- `page`：可选，默认 `1`
+- `size`：可选，默认 `20`，最大 `100`
+
+排序规则：
+- 按 `created_at` 倒序
+- 同一时间下按 `id` 倒序
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "items": [
+      {
+        "id": 1,
+        "batch_id": 10,
+        "operation_type": "loss",
+        "quantity": "2.00",
+        "quantity_after": "6.50",
+        "remarks": "包装破损",
+        "created_at": "2026-05-07T14:30:00+08:00"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "size": 20,
+      "total": 1
+    }
+  }
+}
+```
+
+返回字段结构：
+- `data.items[]`：`BatchOperation`
+- `data.pagination`：`Pagination`
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `404 / 4041 / not_found`
 
 ### PATCH `/batches/{batch_id}/status`
 

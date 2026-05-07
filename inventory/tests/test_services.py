@@ -1,15 +1,16 @@
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from unittest.mock import patch
 
 from django.db import DatabaseError, IntegrityError
 from django.test import SimpleTestCase
 
 from common.exceptions import ConflictApiError, NotFoundApiError
-from inventory.models import Product
+from inventory.models import Batch, Product
 from inventory.expiry import calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
-from inventory.services import BatchService, ProductService
+from inventory.services import BatchOperationService, BatchService, ProductService
 
 
 class ExpiryCalculationTests(SimpleTestCase):
@@ -258,6 +259,137 @@ class BatchServiceTests(SimpleTestCase):
 
         self.assertEqual(total, 1)
         self.assertEqual([batch.id for batch in batches], [1])
+
+
+class BatchOperationServiceTests(SimpleTestCase):
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects.create")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_add_operation_increases_quantity_and_writes_snapshot(
+        self, mock_select_for_update, mock_operation_create, mock_atomic
+    ):
+        mock_atomic.return_value.__enter__.return_value = None
+        batch = Mock(id=3, quantity=Decimal("8.50"))
+        mock_select_for_update.return_value.get.return_value = batch
+        operation = Mock(id=9)
+        mock_operation_create.return_value = operation
+
+        result_operation, result_batch = BatchOperationService.create_operation(
+            3,
+            {
+                "operation_type": "add",
+                "quantity": Decimal("2.00"),
+                "remarks": "restock",
+            },
+        )
+
+        self.assertIs(result_operation, operation)
+        self.assertIs(result_batch, batch)
+        self.assertEqual(batch.quantity, Decimal("10.50"))
+        batch.save.assert_called_once_with(update_fields=["quantity"])
+        mock_operation_create.assert_called_once_with(
+            batch=batch,
+            operation_type="add",
+            quantity=Decimal("2.00"),
+            quantity_after=Decimal("10.50"),
+            remarks="restock",
+        )
+        operation.refresh_from_db.assert_called_once_with(fields=["created_at"])
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects.create")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_deduct_operation_decreases_quantity_and_writes_snapshot(
+        self, mock_select_for_update, mock_operation_create, mock_atomic
+    ):
+        mock_atomic.return_value.__enter__.return_value = None
+        batch = Mock(id=3, quantity=Decimal("8.50"))
+        mock_select_for_update.return_value.get.return_value = batch
+        mock_operation_create.return_value = Mock()
+
+        BatchOperationService.create_operation(
+            3,
+            {
+                "operation_type": "deduct",
+                "quantity": Decimal("2.00"),
+            },
+        )
+
+        self.assertEqual(batch.quantity, Decimal("6.50"))
+        self.assertEqual(mock_operation_create.call_args.kwargs["quantity_after"], Decimal("6.50"))
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_operation_rejects_insufficient_quantity(self, mock_select_for_update, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        batch = Mock(id=3, quantity=Decimal("1.00"))
+        mock_select_for_update.return_value.get.return_value = batch
+
+        with self.assertRaises(ConflictApiError):
+            BatchOperationService.create_operation(
+                3,
+                {
+                    "operation_type": "loss",
+                    "quantity": Decimal("2.00"),
+                },
+            )
+
+        batch.save.assert_not_called()
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_operation_rejects_null_batch_quantity(self, mock_select_for_update, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        batch = Mock(id=3, quantity=None)
+        mock_select_for_update.return_value.get.return_value = batch
+
+        with self.assertRaises(ConflictApiError):
+            BatchOperationService.create_operation(
+                3,
+                {
+                    "operation_type": "add",
+                    "quantity": Decimal("2.00"),
+                },
+            )
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_operation_raises_not_found_for_missing_batch(self, mock_select_for_update, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        mock_select_for_update.return_value.get.side_effect = Batch.DoesNotExist
+
+        with self.assertRaises(NotFoundApiError):
+            BatchOperationService.create_operation(
+                99,
+                {
+                    "operation_type": "add",
+                    "quantity": Decimal("2.00"),
+                },
+            )
+
+    @patch("inventory.services.BatchOperation.objects.filter")
+    @patch("inventory.services.Batch.objects.only")
+    def test_list_operations_filters_and_orders_by_batch_history(self, mock_only, mock_filter):
+        mock_only.return_value.get.return_value = Mock(id=3)
+        queryset = Mock()
+        filtered_queryset = MagicMock()
+        filtered_queryset.count.return_value = 1
+        filtered_queryset.__getitem__ = Mock(return_value=["operation"])
+        queryset.order_by.return_value.filter.return_value = filtered_queryset
+        mock_filter.return_value = queryset
+
+        operations, total = BatchOperationService.list_operations(
+            batch_id=3,
+            operation_type="loss",
+            page=1,
+            size=20,
+        )
+
+        self.assertEqual(operations, ["operation"])
+        self.assertEqual(total, 1)
+        mock_filter.assert_called_once_with(batch_id=3)
+        queryset.order_by.assert_called_once_with("-created_at", "-id")
+        queryset.order_by.return_value.filter.assert_called_once_with(operation_type="loss")
 
 
 def fake_batch(
