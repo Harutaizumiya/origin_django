@@ -7,6 +7,7 @@ from inventory.schemas import (
     BatchOperationCreateSerializer,
     BatchOperationListQuerySerializer,
     BatchOperationOutputSerializer,
+    BatchOperationRevertSerializer,
     BatchOutputSerializer,
     BatchQuantitySummarySerializer,
     BatchStatusUpdateSerializer,
@@ -188,6 +189,24 @@ class BatchOperationCollectionView(ServiceAPIView):
         serializer = BatchOperationCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         operation, batch = BatchOperationService.create_operation(batch_id, serializer.validated_data)
+        return success_response(
+            {
+                "operation": BatchOperationOutputSerializer(operation).data,
+                "batch": BatchQuantitySummarySerializer(batch).data,
+            },
+            status_code=201,
+        )
+
+
+class BatchOperationRevertView(ServiceAPIView):
+    def post(self, request, batch_id: int, operation_id: int):
+        serializer = BatchOperationRevertSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        operation, batch = BatchOperationService.revert_operation(
+            batch_id=batch_id,
+            operation_id=operation_id,
+            data=serializer.validated_data,
+        )
         return success_response(
             {
                 "operation": BatchOperationOutputSerializer(operation).data,

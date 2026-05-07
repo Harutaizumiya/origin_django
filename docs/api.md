@@ -136,6 +136,8 @@
 | `quantity_after` | string | 操作完成后的批次数量快照 |
 | `remarks` | string \| null | 备注 |
 | `created_at` | string | 操作时间 |
+| `reversed_operation_id` | integer \| null | 被撤销的原操作 ID；普通操作为 `null` |
+| `is_reverted` | boolean | 当前操作是否已经被撤销 |
 
 ### Pagination
 
@@ -530,11 +532,13 @@
       "id": 1,
       "batch_id": 10,
       "operation_type": "loss",
-      "quantity": "2.00",
-      "quantity_after": "6.50",
-      "remarks": "包装破损",
-      "created_at": "2026-05-07T14:30:00+08:00"
-    },
+        "quantity": "2.00",
+        "quantity_after": "6.50",
+        "remarks": "包装破损",
+        "created_at": "2026-05-07T14:30:00+08:00",
+        "reversed_operation_id": null,
+        "is_reverted": false
+      },
     "batch": {
       "id": 10,
       "quantity": "6.50"
@@ -583,7 +587,9 @@
         "quantity": "2.00",
         "quantity_after": "6.50",
         "remarks": "包装破损",
-        "created_at": "2026-05-07T14:30:00+08:00"
+        "created_at": "2026-05-07T14:30:00+08:00",
+        "reversed_operation_id": null,
+        "is_reverted": false
       }
     ],
     "pagination": {
@@ -602,6 +608,69 @@
 常见错误：
 - `400 / 4001 / validation_error`
 - `404 / 4041 / not_found`
+
+### POST `/batches/{batch_id}/operations/{operation_id}/revert`
+
+撤销一条批次操作。撤销不会删除原记录，而是创建一条反向操作记录，并更新批次
+`quantity`。
+
+路径参数：
+- `batch_id`：批次 ID
+- `operation_id`：要撤销的操作记录 ID
+
+请求体：
+
+```json
+{
+  "remarks": "撤销误操作"
+}
+```
+
+请求字段：
+- `remarks`：可选，可为 `null` 或空字符串
+
+业务规则：
+- 撤销 `add` 会创建一条 `deduct` 操作。
+- 撤销 `loss` / `deduct` 会创建一条 `add` 操作。
+- 每条原操作最多只能撤销一次；重复撤销返回 `409 / 4091 / conflict`。
+- 撤销操作本身不能再次撤销；尝试撤销返回 `409 / 4091 / conflict`。
+- 撤销 `add` 时如果当前批次数量不足以扣回，返回 `409 / 4091 / conflict`。
+- 撤销不读取、不判断、不修改批次 `status`。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "operation": {
+      "id": 2,
+      "batch_id": 10,
+      "operation_type": "add",
+      "quantity": "2.00",
+      "quantity_after": "8.50",
+      "remarks": "撤销误操作",
+      "created_at": "2026-05-07T14:40:00+08:00",
+      "reversed_operation_id": 1,
+      "is_reverted": false
+    },
+    "batch": {
+      "id": 10,
+      "quantity": "8.50"
+    }
+  }
+}
+```
+
+返回字段结构：
+- `data.operation`：新创建的反向 `BatchOperation`
+- `data.batch`：批次数量摘要
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `404 / 4041 / not_found`
+- `409 / 4091 / conflict`
 
 ### PATCH `/batches/{batch_id}/status`
 

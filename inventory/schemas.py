@@ -115,6 +115,10 @@ class BatchOperationCreateSerializer(serializers.Serializer):
     remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
+class BatchOperationRevertSerializer(serializers.Serializer):
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
 class BatchOperationListQuerySerializer(serializers.Serializer):
     operation_type = serializers.ChoiceField(required=False, choices=VALID_BATCH_OPERATION_TYPES)
     page = serializers.IntegerField(required=False, default=1, min_value=1)
@@ -188,6 +192,27 @@ class BatchQuantitySummarySerializer(serializers.ModelSerializer):
 
 
 class BatchOperationOutputSerializer(serializers.ModelSerializer):
+    is_reverted = serializers.SerializerMethodField()
+
+    def get_is_reverted(self, obj):
+        if isinstance(obj, dict):
+            return bool(obj.get("is_reverted"))
+        if hasattr(obj, "is_reverted"):
+            return bool(obj.is_reverted)
+        if not hasattr(obj, "reversal_operations"):
+            return False
+        return obj.reversal_operations.exists()
+
     class Meta:
         model = BatchOperation
-        fields = ["id", "batch_id", "operation_type", "quantity", "quantity_after", "remarks", "created_at"]
+        fields = [
+            "id",
+            "batch_id",
+            "operation_type",
+            "quantity",
+            "quantity_after",
+            "remarks",
+            "created_at",
+            "reversed_operation_id",
+            "is_reverted",
+        ]

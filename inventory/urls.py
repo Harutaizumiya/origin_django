@@ -5,6 +5,7 @@ from inventory.views import (
     BatchDetailView,
     BatchExpiryAlertsView,
     BatchOperationCollectionView,
+    BatchOperationRevertView,
     BatchStatusView,
     ProductBarcodeDetailView,
     ProductBatchCollectionView,
@@ -22,6 +23,11 @@ urlpatterns = [
     path("batches", BatchCollectionView.as_view(), name="batch-collection"),
     path("batches/expiry-alerts", BatchExpiryAlertsView.as_view(), name="batch-expiry-alerts"),
     path("batches/<int:batch_id>/operations", BatchOperationCollectionView.as_view(), name="batch-operations"),
+    path(
+        "batches/<int:batch_id>/operations/<int:operation_id>/revert",
+        BatchOperationRevertView.as_view(),
+        name="batch-operation-revert",
+    ),
     path("batches/<int:batch_id>/status", BatchStatusView.as_view(), name="batch-status"),
     path("batches/<int:batch_id>", BatchDetailView.as_view(), name="batch-detail"),
 ]

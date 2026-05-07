@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import ANY, MagicMock, Mock, call
 from unittest.mock import patch
 
 from django.db import DatabaseError, IntegrityError
@@ -289,6 +289,7 @@ class BatchOperationServiceTests(SimpleTestCase):
         batch.save.assert_called_once_with(update_fields=["quantity"])
         mock_operation_create.assert_called_once_with(
             batch=batch,
+            reversed_operation=None,
             operation_type="add",
             quantity=Decimal("2.00"),
             quantity_after=Decimal("10.50"),
@@ -372,11 +373,14 @@ class BatchOperationServiceTests(SimpleTestCase):
     def test_list_operations_filters_and_orders_by_batch_history(self, mock_only, mock_filter):
         mock_only.return_value.get.return_value = Mock(id=3)
         queryset = Mock()
+        annotated_queryset = Mock()
         filtered_queryset = MagicMock()
         filtered_queryset.count.return_value = 1
         filtered_queryset.__getitem__ = Mock(return_value=["operation"])
-        queryset.order_by.return_value.filter.return_value = filtered_queryset
-        mock_filter.return_value = queryset
+        queryset.annotate.return_value = annotated_queryset
+        annotated_queryset.order_by.return_value.filter.return_value = filtered_queryset
+        reversal_queryset = Mock()
+        mock_filter.side_effect = [reversal_queryset, queryset]
 
         operations, total = BatchOperationService.list_operations(
             batch_id=3,
@@ -387,9 +391,124 @@ class BatchOperationServiceTests(SimpleTestCase):
 
         self.assertEqual(operations, ["operation"])
         self.assertEqual(total, 1)
-        mock_filter.assert_called_once_with(batch_id=3)
-        queryset.order_by.assert_called_once_with("-created_at", "-id")
-        queryset.order_by.return_value.filter.assert_called_once_with(operation_type="loss")
+        self.assertEqual(
+            mock_filter.call_args_list,
+            [
+                call(reversed_operation_id=ANY),
+                call(batch_id=3),
+            ],
+        )
+        queryset.annotate.assert_called_once()
+        annotated_queryset.order_by.assert_called_once_with("-created_at", "-id")
+        annotated_queryset.order_by.return_value.filter.assert_called_once_with(operation_type="loss")
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_revert_add_operation_creates_deduct_reversal(self, mock_batch_select_for_update, mock_operation_objects, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        original_operation = Mock(
+            id=7,
+            batch_id=3,
+            operation_type="add",
+            quantity=Decimal("2.00"),
+            reversed_operation_id=None,
+        )
+        batch = Mock(id=3, quantity=Decimal("8.50"))
+        reversal_operation = Mock(id=8)
+        mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
+        mock_operation_objects.filter.return_value.exists.return_value = False
+        mock_operation_objects.create.return_value = reversal_operation
+        mock_batch_select_for_update.return_value.get.return_value = batch
+
+        result_operation, result_batch = BatchOperationService.revert_operation(
+            batch_id=3,
+            operation_id=7,
+            data={"remarks": "undo mistake"},
+        )
+
+        self.assertIs(result_operation, reversal_operation)
+        self.assertIs(result_batch, batch)
+        self.assertEqual(batch.quantity, Decimal("6.50"))
+        batch.save.assert_called_once_with(update_fields=["quantity"])
+        mock_operation_objects.create.assert_called_once_with(
+            batch=batch,
+            reversed_operation=original_operation,
+            operation_type="deduct",
+            quantity=Decimal("2.00"),
+            quantity_after=Decimal("6.50"),
+            remarks="undo mistake",
+        )
+        reversal_operation.refresh_from_db.assert_called_once_with(fields=["created_at"])
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_revert_deduct_operation_creates_add_reversal(self, mock_batch_select_for_update, mock_operation_objects, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        original_operation = Mock(
+            id=7,
+            batch_id=3,
+            operation_type="deduct",
+            quantity=Decimal("2.00"),
+            reversed_operation_id=None,
+        )
+        batch = Mock(id=3, quantity=Decimal("6.50"))
+        mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
+        mock_operation_objects.filter.return_value.exists.return_value = False
+        mock_operation_objects.create.return_value = Mock()
+        mock_batch_select_for_update.return_value.get.return_value = batch
+
+        BatchOperationService.revert_operation(batch_id=3, operation_id=7, data={})
+
+        self.assertEqual(batch.quantity, Decimal("8.50"))
+        self.assertEqual(mock_operation_objects.create.call_args.kwargs["operation_type"], "add")
+        self.assertEqual(mock_operation_objects.create.call_args.kwargs["quantity_after"], Decimal("8.50"))
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects")
+    def test_revert_operation_rejects_already_reverted_operation(self, mock_operation_objects, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        original_operation = Mock(id=7, reversed_operation_id=None)
+        mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
+        mock_operation_objects.filter.return_value.exists.return_value = True
+
+        with self.assertRaises(ConflictApiError):
+            BatchOperationService.revert_operation(batch_id=3, operation_id=7, data={})
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects")
+    def test_revert_operation_rejects_reversal_operation(self, mock_operation_objects, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        reversal_operation = Mock(id=8, reversed_operation_id=7)
+        mock_operation_objects.select_for_update.return_value.get.return_value = reversal_operation
+
+        with self.assertRaises(ConflictApiError):
+            BatchOperationService.revert_operation(batch_id=3, operation_id=8, data={})
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_revert_add_operation_rejects_insufficient_quantity(
+        self, mock_batch_select_for_update, mock_operation_objects, mock_atomic
+    ):
+        mock_atomic.return_value.__enter__.return_value = None
+        original_operation = Mock(
+            id=7,
+            batch_id=3,
+            operation_type="add",
+            quantity=Decimal("2.00"),
+            reversed_operation_id=None,
+        )
+        batch = Mock(id=3, quantity=Decimal("1.00"))
+        mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
+        mock_operation_objects.filter.return_value.exists.return_value = False
+        mock_batch_select_for_update.return_value.get.return_value = batch
+
+        with self.assertRaises(ConflictApiError):
+            BatchOperationService.revert_operation(batch_id=3, operation_id=7, data={})
+
+        batch.save.assert_not_called()
 
 
 def fake_batch(

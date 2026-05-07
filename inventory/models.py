@@ -38,6 +38,14 @@ class Batch(models.Model):
 class BatchOperation(models.Model):
     id = models.BigAutoField(primary_key=True)
     batch = models.ForeignKey(Batch, on_delete=models.DO_NOTHING, related_name="operations", db_column="batch_id")
+    reversed_operation = models.ForeignKey(
+        "self",
+        on_delete=models.DO_NOTHING,
+        related_name="reversal_operations",
+        db_column="reversed_operation_id",
+        blank=True,
+        null=True,
+    )
     operation_type = models.CharField(max_length=20)
     quantity = models.DecimalField(max_digits=12, decimal_places=2)
     quantity_after = models.DecimalField(max_digits=12, decimal_places=2)
@@ -50,4 +58,7 @@ class BatchOperation(models.Model):
         indexes = [
             models.Index(fields=["batch", "-created_at", "-id"], name="batch_operations_batch_created_idx"),
             models.Index(fields=["operation_type"], name="batch_operations_type_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["reversed_operation"], name="batch_operations_reversed_operation_uniq"),
         ]

@@ -464,6 +464,8 @@ class InventoryApiTests(SimpleTestCase):
                 quantity_after=Decimal("6.50"),
                 remarks="broken package",
                 created_at=None,
+                reversed_operation_id=None,
+                is_reverted=False,
             ),
             SimpleNamespace(id=3, quantity=Decimal("6.50")),
         )
@@ -493,6 +495,8 @@ class InventoryApiTests(SimpleTestCase):
                         "quantity_after": "6.50",
                         "remarks": "broken package",
                         "created_at": None,
+                        "reversed_operation_id": None,
+                        "is_reverted": False,
                     },
                     "batch": {
                         "id": 3,
@@ -517,6 +521,8 @@ class InventoryApiTests(SimpleTestCase):
                     quantity_after=Decimal("6.50"),
                     remarks="broken package",
                     created_at=None,
+                    reversed_operation_id=None,
+                    is_reverted=True,
                 )
             ],
             1,
@@ -534,7 +540,71 @@ class InventoryApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["pagination"], {"page": 2, "size": 5, "total": 1})
         self.assertEqual(response.json()["data"]["items"][0]["quantity_after"], "6.50")
+        self.assertIs(response.json()["data"]["items"][0]["is_reverted"], True)
         mock_list_operations.assert_called_once_with(batch_id=3, operation_type="loss", page=2, size=5)
+
+    @patch("inventory.views.BatchOperationService.revert_operation")
+    def test_revert_batch_operation_returns_reversal_and_batch_summary(self, mock_revert_operation):
+        mock_revert_operation.return_value = (
+            SimpleNamespace(
+                id=8,
+                batch_id=3,
+                operation_type="add",
+                quantity=Decimal("2.00"),
+                quantity_after=Decimal("8.50"),
+                remarks="undo loss",
+                created_at=None,
+                reversed_operation_id=7,
+                is_reverted=False,
+            ),
+            SimpleNamespace(id=3, quantity=Decimal("8.50")),
+        )
+
+        response = self.client.post(
+            "/api/batches/3/operations/7/revert",
+            {"remarks": "undo loss"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.json(),
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "operation": {
+                        "id": 8,
+                        "batch_id": 3,
+                        "operation_type": "add",
+                        "quantity": "2.00",
+                        "quantity_after": "8.50",
+                        "remarks": "undo loss",
+                        "created_at": None,
+                        "reversed_operation_id": 7,
+                        "is_reverted": False,
+                    },
+                    "batch": {
+                        "id": 3,
+                        "quantity": "8.50",
+                    },
+                },
+            },
+        )
+        mock_revert_operation.assert_called_once_with(
+            batch_id=3,
+            operation_id=7,
+            data={"remarks": "undo loss"},
+        )
+
+    @patch("inventory.views.BatchOperationService.revert_operation")
+    def test_revert_batch_operation_translates_conflict(self, mock_revert_operation):
+        mock_revert_operation.side_effect = ConflictApiError("Batch operation has already been reverted")
+
+        response = self.client.post("/api/batches/3/operations/7/revert", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"code": 4091, "message": "conflict", "data": None})
 
     def test_create_batch_operation_rejects_invalid_operation_type(self):
         response = self.client.post(

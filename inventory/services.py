@@ -5,7 +5,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from django.db import DatabaseError, IntegrityError, connection, transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from common.exceptions import ConflictApiError, NotFoundApiError
@@ -298,6 +298,11 @@ class BatchService:
 
 class BatchOperationService:
     decrease_operation_types = {"loss", "deduct"}
+    reverse_operation_types = {
+        "add": "deduct",
+        "loss": "add",
+        "deduct": "add",
+    }
 
     @classmethod
     def create_operation(cls, batch_id: int, data: dict):
@@ -320,6 +325,7 @@ class BatchOperationService:
                 batch.save(update_fields=["quantity"])
                 operation = BatchOperation.objects.create(
                     batch=batch,
+                    reversed_operation=data.get("reversed_operation"),
                     operation_type=data["operation_type"],
                     quantity=quantity,
                     quantity_after=quantity_after,
@@ -336,6 +342,49 @@ class BatchOperationService:
         return operation, batch
 
     @classmethod
+    def revert_operation(cls, *, batch_id: int, operation_id: int, data: dict):
+        try:
+            with transaction.atomic():
+                original_operation = BatchOperation.objects.select_for_update().get(pk=operation_id, batch_id=batch_id)
+                if original_operation.reversed_operation_id is not None:
+                    raise ConflictApiError("Reversal operation cannot be reverted")
+                if BatchOperation.objects.filter(reversed_operation_id=original_operation.id).exists():
+                    raise ConflictApiError("Batch operation has already been reverted")
+
+                batch = Batch.objects.select_for_update().get(pk=batch_id)
+                if batch.quantity is None:
+                    raise ConflictApiError("Batch quantity is unavailable")
+
+                operation_type = cls.reverse_operation_types[original_operation.operation_type]
+                quantity_after = cls._apply_quantity(
+                    current_quantity=batch.quantity,
+                    operation_type=operation_type,
+                    quantity=original_operation.quantity,
+                )
+                if quantity_after < Decimal("0"):
+                    raise ConflictApiError("Insufficient batch quantity")
+
+                batch.quantity = quantity_after
+                batch.save(update_fields=["quantity"])
+                reversal_operation = BatchOperation.objects.create(
+                    batch=batch,
+                    reversed_operation=original_operation,
+                    operation_type=operation_type,
+                    quantity=original_operation.quantity,
+                    quantity_after=quantity_after,
+                    remarks=data.get("remarks"),
+                )
+        except BatchOperation.DoesNotExist as exc:
+            raise NotFoundApiError(f"Batch operation {operation_id} not found") from exc
+        except IntegrityError as exc:
+            raise ConflictApiError("Batch operation has already been reverted") from exc
+        except DatabaseError as exc:
+            _raise_conflict("Unable to revert batch operation", exc)
+
+        reversal_operation.refresh_from_db(fields=["created_at"])
+        return reversal_operation, batch
+
+    @classmethod
     def _apply_quantity(cls, *, current_quantity: Decimal, operation_type: str, quantity: Decimal) -> Decimal:
         if operation_type == "add":
             return current_quantity + quantity
@@ -347,7 +396,12 @@ class BatchOperationService:
     def list_operations(*, batch_id: int, operation_type: str | None, page: int, size: int):
         try:
             Batch.objects.only("id").get(pk=batch_id)
-            queryset = BatchOperation.objects.filter(batch_id=batch_id).order_by("-created_at", "-id")
+            reversal_queryset = BatchOperation.objects.filter(reversed_operation_id=OuterRef("pk"))
+            queryset = (
+                BatchOperation.objects.filter(batch_id=batch_id)
+                .annotate(is_reverted=Exists(reversal_queryset))
+                .order_by("-created_at", "-id")
+            )
             if operation_type:
                 queryset = queryset.filter(operation_type=operation_type)
 
