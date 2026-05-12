@@ -9,6 +9,7 @@ from inventory.schemas import (
     BatchOperationOutputSerializer,
     BatchOperationRevertSerializer,
     BatchOutputSerializer,
+    BatchLabelPayloadSerializer,
     BatchQuantitySummarySerializer,
     BatchStatusUpdateSerializer,
     BatchUpdateSerializer,
@@ -18,8 +19,12 @@ from inventory.schemas import (
     ProductListQuerySerializer,
     ProductOutputSerializer,
     ProductUpdateSerializer,
+    QrScanBulkRequestSerializer,
+    QrScanBulkResultSerializer,
+    QrScanRequestSerializer,
+    QrScanResultSerializer,
 )
-from inventory.services import BatchOperationService, BatchService, ProductService
+from inventory.services import BatchOperationService, BatchService, ProductService, QrCredentialService, QrScanService
 
 
 def paginated_payload(*, items, page: int, size: int, total: int):
@@ -30,6 +35,30 @@ def paginated_payload(*, items, page: int, size: int, total: int):
             "size": size,
             "total": total,
         },
+    }
+
+
+def qr_scan_payload(validated_data: dict) -> dict:
+    return {
+        "qr": validated_data["qr"],
+        "source": validated_data["source"],
+        "device_id": validated_data.get("deviceId"),
+        "client_scan_id": validated_data.get("clientScanId"),
+        "scanned_at": validated_data.get("scannedAt"),
+    }
+
+
+def scan_request_context(request) -> dict:
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    ip_address = forwarded_for.split(",", 1)[0].strip() if forwarded_for else request.META.get("REMOTE_ADDR")
+    user = getattr(request, "user", None)
+    scanner_user = None
+    if user is not None and getattr(user, "is_authenticated", False):
+        scanner_user = str(user)
+    return {
+        "ip_address": ip_address,
+        "user_agent": request.META.get("HTTP_USER_AGENT", ""),
+        "scanner_user": scanner_user,
     }
 
 
@@ -163,6 +192,37 @@ class BatchExpiryAlertsView(ServiceAPIView):
                 total=total,
             ),
         )
+
+
+class BatchLabelPayloadView(ServiceAPIView):
+    def get(self, request, batch_id: int):
+        payload = QrCredentialService.build_label_payload(batch_id)
+        serializer = BatchLabelPayloadSerializer(payload)
+        return success_response(serializer.data)
+
+
+class QrScanCollectionView(ServiceAPIView):
+    def post(self, request):
+        serializer = QrScanRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = QrScanService.scan_qr(
+            qr_scan_payload(serializer.validated_data),
+            scan_request_context(request),
+        )
+        output = QrScanResultSerializer(result)
+        return success_response(output.data)
+
+
+class QrScanBulkView(ServiceAPIView):
+    def post(self, request):
+        serializer = QrScanBulkRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = QrScanService.scan_bulk(
+            [qr_scan_payload(item) for item in serializer.validated_data["items"]],
+            scan_request_context(request),
+        )
+        output = QrScanBulkResultSerializer(result)
+        return success_response(output.data)
 
 
 class BatchOperationCollectionView(ServiceAPIView):

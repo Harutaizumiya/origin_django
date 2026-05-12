@@ -139,6 +139,61 @@
 | `reversed_operation_id` | integer \| null | 被撤销的原操作 ID；普通操作为 `null` |
 | `is_reverted` | boolean | 当前操作是否已经被撤销 |
 
+### BatchQuantitySummary
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | integer | 批次 ID |
+| `quantity` | string | 当前批次数量 |
+| `status` | string \| null | 当前批次状态 |
+
+### BatchLabelPayload
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `batchCode` | string | 批次号 |
+| `productName` | string | 商品名称 |
+| `barcode` | string | 商品条码 |
+| `quantity` | string \| null | 批次数量 |
+| `location` | string \| null | 商品存放位置 |
+| `expireDate` | string \| null | 到期日期，`YYYY-MM-DD` |
+| `qrCode` | string | 可打印二维码内容，格式为 `OB1\|{batchCode}\|{token}` |
+
+### QrScanRequest
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `qr` | string | 原始二维码内容 |
+| `source` | string | 扫码来源：`web_camera`、`mobile_camera`、`handheld` |
+| `deviceId` | string \| null | 设备标识，可选 |
+| `clientScanId` | string \| null | 客户端扫码 ID，用于去重 |
+| `scannedAt` | string \| null | 客户端扫码时间 |
+
+### QrScanResult
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `auditId` | string | 审计记录 ID |
+| `batchCode` | string \| null | 批次号 |
+| `productName` | string \| null | 商品名称 |
+| `status` | string | `valid`、`near_expiry`、`expired`、`invalid`、`revoked`、`not_found` |
+| `message` | string | 前端展示消息 |
+| `expireDate` | string \| null | 到期日期 |
+| `remainingDays` | integer \| null | 剩余天数，过期为负数 |
+| `clientScanId` | string \| null | 批量扫码时回传客户端扫码 ID；无值时省略 |
+
+### QrScanBulkRequest
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `items` | QrScanRequest[] | 扫码项列表，不能为空 |
+
+### QrScanBulkResult
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `items` | QrScanResult[] | 每个二维码的独立扫码结果 |
+
 ### Pagination
 
 | 字段 | 类型 | 说明 |
@@ -436,6 +491,10 @@
 - `status`：可选，默认 `unopened`
 - `remarks`：可选，可为 `null` 或空字符串
 
+说明：
+- 创建批次时后端会自动签发一条二维码凭证，但本接口不返回二维码 token。
+- 标签打印应调用 `GET /batches/{batch_id}/label-payload` 获取专用打印载荷。
+
 成功响应：
 - `data`：`Batch`
 
@@ -456,6 +515,45 @@
 
 常见错误：
 - `404 / 4041 / not_found`
+
+### GET `/batches/{batch_id}/label-payload`
+
+查询批次标签打印载荷，并签发一条新的可打印二维码凭证。普通批次列表和详情接口不会返回二维码 token。
+
+路径参数：
+- `batch_id`：批次 ID
+
+说明：
+- 当前项目尚未接入真实认证，因此本接口暂不做登录校验。
+- 后续启用认证后，本接口必须要求登录和批次标签打印权限。
+- 二维码内容只包含凭证：`OB1|{batchCode}|{token}`，不包含效期判断结果。
+- token 明文只在本次响应中返回；数据库只保存 `sha256(token + QR_TOKEN_PEPPER)`。
+- 读取标签载荷会签发一条新凭证；已有未吊销二维码继续有效。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "batchCode": "B202605120001",
+    "productName": "鲜奶",
+    "barcode": "692xxxx",
+    "quantity": "12.00",
+    "location": "A-01",
+    "expireDate": "2026-08-11",
+    "qrCode": "OB1|B202605120001|N7K3Q9X2P4A8M6D2"
+  }
+}
+```
+
+返回字段结构：
+- `data`：`BatchLabelPayload`
+
+常见错误：
+- `404 / 4041 / not_found`
+- `409 / 4091 / conflict`
 
 ### PATCH `/batches/{batch_id}`
 
@@ -494,8 +592,7 @@
 
 ### POST `/batches/{batch_id}/operations`
 
-创建一条批次操作记录，并同步更新对应批次的 `quantity`。该接口不读取、不判断、不修改
-批次 `status`。
+创建一条批次操作记录，并同步更新对应批次的 `quantity` 和 `status`。
 
 路径参数：
 - `batch_id`：批次 ID
@@ -518,6 +615,8 @@
 业务规则：
 - `add`：`batch.quantity += quantity`
 - `loss` / `deduct`：`batch.quantity -= quantity`
+- 当 `quantity_after = 0` 时，系统自动将批次 `status` 更新为 `used_up`
+- 当批次当前 `status = used_up` 且本次操作后 `quantity_after > 0` 时，系统自动将批次 `status` 重置为 `null`
 - 扣减后小于 `0` 时拒绝，返回 `409 / 4091 / conflict`
 - 历史数据中 `batch.quantity` 为 `null` 时拒绝，返回 `409 / 4091 / conflict`
 
@@ -541,7 +640,8 @@
       },
     "batch": {
       "id": 10,
-      "quantity": "6.50"
+      "quantity": "6.50",
+      "status": null
     }
   }
 }
@@ -549,7 +649,7 @@
 
 返回字段结构：
 - `data.operation`：`BatchOperation`
-- `data.batch`：批次数量摘要
+- `data.batch`：`BatchQuantitySummary`
 
 常见错误：
 - `400 / 4001 / validation_error`
@@ -612,7 +712,7 @@
 ### POST `/batches/{batch_id}/operations/{operation_id}/revert`
 
 撤销一条批次操作。撤销不会删除原记录，而是创建一条反向操作记录，并更新批次
-`quantity`。
+`quantity` 和 `status`。
 
 路径参数：
 - `batch_id`：批次 ID
@@ -632,10 +732,11 @@
 业务规则：
 - 撤销 `add` 会创建一条 `deduct` 操作。
 - 撤销 `loss` / `deduct` 会创建一条 `add` 操作。
+- 当撤销后的 `quantity_after = 0` 时，系统自动将批次 `status` 更新为 `used_up`
+- 当批次当前 `status = used_up` 且撤销后 `quantity_after > 0` 时，系统自动将批次 `status` 重置为 `null`
 - 每条原操作最多只能撤销一次；重复撤销返回 `409 / 4091 / conflict`。
 - 撤销操作本身不能再次撤销；尝试撤销返回 `409 / 4091 / conflict`。
 - 撤销 `add` 时如果当前批次数量不足以扣回，返回 `409 / 4091 / conflict`。
-- 撤销不读取、不判断、不修改批次 `status`。
 
 成功响应：
 
@@ -657,7 +758,8 @@
     },
     "batch": {
       "id": 10,
-      "quantity": "8.50"
+      "quantity": "8.50",
+      "status": null
     }
   }
 }
@@ -665,7 +767,7 @@
 
 返回字段结构：
 - `data.operation`：新创建的反向 `BatchOperation`
-- `data.batch`：批次数量摘要
+- `data.batch`：`BatchQuantitySummary`
 
 常见错误：
 - `400 / 4001 / validation_error`
@@ -720,6 +822,140 @@
 常见错误：
 - `404 / 4041 / not_found`
 
+## 二维码扫码接口
+
+### POST `/qr-scans`
+
+提交一次二维码扫码结果。所有扫码请求都会写入审计，包括格式错误和无效 token。
+
+请求体：
+
+```json
+{
+  "qr": "OB1|B202605120001|N7K3Q9X2P4A8M6D2",
+  "source": "mobile_camera",
+  "deviceId": "device-001",
+  "clientScanId": "uuid-from-client",
+  "scannedAt": "2026-05-12T10:30:00+08:00"
+}
+```
+
+请求字段：
+- `qr`：必填，原始二维码内容
+- `source`：必填，枚举值为 `web_camera`、`mobile_camera`、`handheld`
+- `deviceId`：可选，可为 `null` 或空字符串
+- `clientScanId`：可选，可为 `null` 或空字符串；非空时按 `source + deviceId + clientScanId` 去重
+- `scannedAt`：可选，客户端扫码时间
+
+处理规则：
+- 先创建审计草稿，再解析二维码、匹配凭证、检查吊销和批次存在性、计算效期，最后更新审计结果。
+- `clientScanId` 去重命中时不新增审计，直接返回首次审计结果。
+- 前端可以解析二维码格式用于“正在识别”的体验，但不能自行判断效期。
+
+状态规则：
+
+| status | 说明 |
+| --- | --- |
+| `valid` | 未过期且剩余天数大于临期阈值 |
+| `near_expiry` | 未过期且 `remainingDays <= QR_SCAN_NEAR_EXPIRY_DAYS` |
+| `expired` | `expire_date < today` |
+| `invalid` | 格式错误或 token 错误 |
+| `revoked` | 二维码凭证已吊销 |
+| `not_found` | 凭证匹配到批次号，但批次记录不存在 |
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "auditId": "scan_01J...",
+    "batchCode": "B202605120001",
+    "productName": "鲜奶",
+    "status": "valid",
+    "message": "该批次仍在效期内",
+    "expireDate": "2026-08-11",
+    "remainingDays": 91,
+    "clientScanId": "uuid-from-client"
+  }
+}
+```
+
+返回字段结构：
+- `data`：`QrScanResult`
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `409 / 4091 / conflict`
+
+### POST `/qr-scans/bulk`
+
+批量提交多个二维码扫码结果。每个二维码都会独立处理和落审计。
+
+请求体：
+
+```json
+{
+  "items": [
+    {
+      "qr": "OB1|B202605120001|N7K3Q9X2P4A8M6D2",
+      "source": "mobile_camera",
+      "deviceId": "device-001",
+      "clientScanId": "scan-001",
+      "scannedAt": "2026-05-12T10:30:00+08:00"
+    },
+    {
+      "qr": "bad-qr",
+      "source": "mobile_camera",
+      "deviceId": "device-001",
+      "clientScanId": "scan-002",
+      "scannedAt": "2026-05-12T10:30:01+08:00"
+    }
+  ]
+}
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "items": [
+      {
+        "auditId": "scan_01J...",
+        "batchCode": "B202605120001",
+        "productName": "鲜奶",
+        "status": "valid",
+        "message": "该批次仍在效期内",
+        "expireDate": "2026-08-11",
+        "remainingDays": 91,
+        "clientScanId": "scan-001"
+      },
+      {
+        "auditId": "scan_01K...",
+        "batchCode": null,
+        "productName": null,
+        "status": "invalid",
+        "message": "二维码格式错误",
+        "expireDate": null,
+        "remainingDays": null,
+        "clientScanId": "scan-002"
+      }
+    ]
+  }
+}
+```
+
+返回字段结构：
+- `data`：`QrScanBulkResult`
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `409 / 4091 / conflict`
+
 ## 其他
 
 - 首页：`GET /`
@@ -755,7 +991,7 @@
 请求参数：
 
 - `product_id`：可选，按商品 ID 过滤
-- `status`：可选，默认 `unopened`
+- `status`：可选
 - `category`：可选，按商品分类精确过滤
 - `location`：可选，按商品位置精确过滤
 - `expiry_status`：可选，枚举值为 `expired`、`critical`、`warning`、`normal`
@@ -766,7 +1002,6 @@
 
 默认行为：
 
-- 只返回 `status = unopened` 的批次。
 - 只返回生命周期后段状态：`expired`、`critical`、`warning`。
 - 默认运营窗口为 `days_until_expiry <= 30`。
 - `include_expired=false` 时排除已过期批次。

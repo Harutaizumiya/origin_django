@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -62,6 +63,8 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 CORS_ALLOW_ALL_ORIGINS = True
+QR_SCAN_NEAR_EXPIRY_DAYS = 7
+QR_TOKEN_PEPPER = os.environ.get("QR_TOKEN_PEPPER") or SECRET_KEY
 
 REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,

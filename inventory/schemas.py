@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from inventory.expiry import VALID_EXPIRY_STATUSES, calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
 from inventory.models import Batch, BatchOperation, Product
+from inventory.services import QR_SCAN_SOURCES, QR_SCAN_STATUSES
 
 
 VALID_BATCH_OPERATION_TYPES = ("add", "loss", "deduct")
@@ -72,7 +73,7 @@ class BatchListQuerySerializer(serializers.Serializer):
 
 class ExpiryAlertQuerySerializer(serializers.Serializer):
     product_id = serializers.IntegerField(required=False, min_value=1)
-    status = serializers.CharField(required=False, allow_blank=False, default="unopened")
+    status = serializers.CharField(required=False, allow_blank=False)
     category = serializers.CharField(required=False, allow_blank=False)
     location = serializers.CharField(required=False, allow_blank=False)
     expiry_status = serializers.ChoiceField(required=False, choices=VALID_EXPIRY_STATUSES)
@@ -123,6 +124,49 @@ class BatchOperationListQuerySerializer(serializers.Serializer):
     operation_type = serializers.ChoiceField(required=False, choices=VALID_BATCH_OPERATION_TYPES)
     page = serializers.IntegerField(required=False, default=1, min_value=1)
     size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
+
+
+class QrScanRequestSerializer(serializers.Serializer):
+    qr = serializers.CharField()
+    source = serializers.ChoiceField(choices=QR_SCAN_SOURCES)
+    deviceId = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    clientScanId = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    scannedAt = serializers.DateTimeField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        for field in ("deviceId", "clientScanId"):
+            if attrs.get(field) == "":
+                attrs[field] = None
+        return attrs
+
+
+class QrScanBulkRequestSerializer(serializers.Serializer):
+    items = QrScanRequestSerializer(many=True, allow_empty=False)
+
+
+class BatchLabelPayloadSerializer(serializers.Serializer):
+    batchCode = serializers.CharField()
+    productName = serializers.CharField()
+    barcode = serializers.CharField()
+    quantity = serializers.CharField(allow_null=True)
+    location = serializers.CharField(allow_null=True)
+    expireDate = serializers.CharField(allow_null=True)
+    qrCode = serializers.CharField()
+
+
+class QrScanResultSerializer(serializers.Serializer):
+    auditId = serializers.CharField()
+    batchCode = serializers.CharField(allow_null=True)
+    productName = serializers.CharField(allow_null=True)
+    status = serializers.ChoiceField(choices=QR_SCAN_STATUSES)
+    message = serializers.CharField()
+    expireDate = serializers.CharField(allow_null=True)
+    remainingDays = serializers.IntegerField(allow_null=True)
+    clientScanId = serializers.CharField(required=False, allow_null=True)
+
+
+class QrScanBulkResultSerializer(serializers.Serializer):
+    items = QrScanResultSerializer(many=True)
 
 
 class ProductSummarySerializer(serializers.ModelSerializer):
@@ -188,7 +232,7 @@ class BatchOutputSerializer(serializers.ModelSerializer):
 class BatchQuantitySummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Batch
-        fields = ["id", "quantity"]
+        fields = ["id", "quantity", "status"]
 
 
 class BatchOperationOutputSerializer(serializers.ModelSerializer):

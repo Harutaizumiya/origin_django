@@ -1,20 +1,57 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+from django.conf import settings
 from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from common.exceptions import ConflictApiError, NotFoundApiError
 from inventory.expiry import ALERT_EXPIRY_STATUSES, calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
-from inventory.models import Batch, BatchOperation, Product
+from inventory.models import Batch, BatchOperation, BatchQrCredential, Product, QrScanAuditLog
+
+
+QR_CODE_PREFIX = "OB1"
+QR_SCAN_SOURCES = ("web_camera", "mobile_camera", "handheld")
+
+QR_SCAN_STATUS_VALID = "valid"
+QR_SCAN_STATUS_NEAR_EXPIRY = "near_expiry"
+QR_SCAN_STATUS_EXPIRED = "expired"
+QR_SCAN_STATUS_INVALID = "invalid"
+QR_SCAN_STATUS_REVOKED = "revoked"
+QR_SCAN_STATUS_NOT_FOUND = "not_found"
+
+QR_SCAN_STATUSES = (
+    QR_SCAN_STATUS_VALID,
+    QR_SCAN_STATUS_NEAR_EXPIRY,
+    QR_SCAN_STATUS_EXPIRED,
+    QR_SCAN_STATUS_INVALID,
+    QR_SCAN_STATUS_REVOKED,
+    QR_SCAN_STATUS_NOT_FOUND,
+)
 
 
 def _raise_conflict(detail: str, exc: Exception) -> None:
     raise ConflictApiError(detail) from exc
+
+
+def _format_date(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _format_decimal(value) -> str | None:
+    if value is None:
+        return None
+    return f"{Decimal(value):.2f}"
 
 
 class ProductService:
@@ -145,12 +182,14 @@ class BatchService:
         try:
             with transaction.atomic():
                 batch = Batch.objects.create(**payload)
+                QrCredentialService.issue_for_batch(batch)
         except IntegrityError as exc:
             if cls._is_stale_primary_key_sequence_error(exc):
                 try:
                     with transaction.atomic():
                         cls._sync_batch_id_sequence()
                         batch = Batch.objects.create(**payload)
+                        QrCredentialService.issue_for_batch(batch)
                 except IntegrityError as retry_exc:
                     raise ConflictApiError("Unable to create batch") from retry_exc
                 except DatabaseError as retry_exc:
@@ -296,6 +335,291 @@ class BatchService:
             _raise_conflict("Unable to list expiry alerts", exc)
 
 
+class QrCredentialService:
+    @staticmethod
+    def generate_token() -> str:
+        return secrets.token_urlsafe(24)
+
+    @staticmethod
+    def hash_token(token: str) -> str:
+        return hashlib.sha256(f"{token}{settings.QR_TOKEN_PEPPER}".encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def format_qr_code(batch_code: str, token: str) -> str:
+        return f"{QR_CODE_PREFIX}|{batch_code}|{token}"
+
+    @classmethod
+    def issue_for_batch(cls, batch: Batch, *, created_by: str | None = None):
+        token = cls.generate_token()
+        credential = BatchQrCredential.objects.create(
+            batch=batch,
+            batch_code=batch.batch_code,
+            token_hash=cls.hash_token(token),
+            created_by=created_by,
+        )
+        return credential, cls.format_qr_code(batch.batch_code, token)
+
+    @classmethod
+    def build_label_payload(cls, batch_id: int) -> dict:
+        try:
+            batch = Batch.objects.select_related("product").get(pk=batch_id)
+            _credential, qr_code = cls.issue_for_batch(batch)
+        except Batch.DoesNotExist as exc:
+            raise NotFoundApiError(f"Batch {batch_id} not found") from exc
+        except DatabaseError as exc:
+            _raise_conflict("Unable to build batch label payload", exc)
+
+        return {
+            "batchCode": batch.batch_code,
+            "productName": batch.product.product_name,
+            "barcode": batch.product.barcode,
+            "quantity": _format_decimal(batch.quantity),
+            "location": batch.product.location,
+            "expireDate": _format_date(batch.expire_date),
+            "qrCode": qr_code,
+        }
+
+    @classmethod
+    def backfill_missing_credentials(cls, *, created_by: str | None = "backfill") -> int:
+        try:
+            active_batch_ids = BatchQrCredential.objects.filter(revoked_at__isnull=True).values_list(
+                "batch_id",
+                flat=True,
+            )
+            batches = Batch.objects.exclude(id__in=active_batch_ids)
+            count = 0
+            with transaction.atomic():
+                for batch in batches:
+                    cls.issue_for_batch(batch, created_by=created_by)
+                    count += 1
+            return count
+        except DatabaseError as exc:
+            _raise_conflict("Unable to backfill batch QR credentials", exc)
+
+
+class QrScanService:
+    pending_message = "pending"
+
+    @classmethod
+    def scan_qr(cls, data: dict, context: dict | None = None) -> dict:
+        context = context or {}
+        try:
+            duplicate = cls._find_duplicate(data)
+            if duplicate is not None:
+                return cls._result_from_audit(duplicate, client_scan_id=data.get("client_scan_id"))
+
+            with transaction.atomic():
+                audit = cls._create_audit(data, context)
+                result = cls._resolve_scan_result(data["qr"])
+                cls._apply_audit_result(audit, result)
+        except DatabaseError as exc:
+            _raise_conflict("Unable to record QR scan", exc)
+        return cls._public_result(result, audit.id, client_scan_id=data.get("client_scan_id"))
+
+    @classmethod
+    def scan_bulk(cls, items: list[dict], context: dict | None = None) -> dict:
+        return {"items": [cls.scan_qr(item, context) for item in items]}
+
+    @staticmethod
+    def _generate_audit_id() -> str:
+        return f"scan_{uuid4().hex}"
+
+    @classmethod
+    def _find_duplicate(cls, data: dict):
+        client_scan_id = data.get("client_scan_id")
+        if not client_scan_id:
+            return None
+        return (
+            QrScanAuditLog.objects.filter(
+                source=data["source"],
+                device_id=data.get("device_id"),
+                client_scan_id=client_scan_id,
+            )
+            .order_by("scanned_at_server", "id")
+            .first()
+        )
+
+    @classmethod
+    def _create_audit(cls, data: dict, context: dict):
+        return QrScanAuditLog.objects.create(
+            id=cls._generate_audit_id(),
+            raw_qr=data["qr"],
+            source=data["source"],
+            device_id=data.get("device_id"),
+            client_scan_id=data.get("client_scan_id"),
+            scanner_user=context.get("scanner_user"),
+            scanned_at_client=data.get("scanned_at"),
+            scanned_at_server=timezone.now(),
+            ip_address=context.get("ip_address"),
+            user_agent=context.get("user_agent"),
+            result_status=QR_SCAN_STATUS_INVALID,
+            result_message=cls.pending_message,
+        )
+
+    @classmethod
+    def _resolve_scan_result(cls, qr: str) -> dict:
+        parsed = cls._parse_qr(qr)
+        if parsed is None:
+            return cls._result(
+                status=QR_SCAN_STATUS_INVALID,
+                message="二维码格式错误",
+                failure_reason="invalid_format",
+            )
+
+        batch_code, token = parsed
+        token_hash = QrCredentialService.hash_token(token)
+        credential = (
+            BatchQrCredential.objects.filter(batch_code=batch_code, token_hash=token_hash)
+            .order_by("-issued_at", "-id")
+            .first()
+        )
+        if credential is None:
+            return cls._result(
+                status=QR_SCAN_STATUS_INVALID,
+                message="二维码无效",
+                batch_code=batch_code,
+                failure_reason="token_mismatch",
+            )
+
+        if credential.revoked_at is not None:
+            return cls._result(
+                status=QR_SCAN_STATUS_REVOKED,
+                message="二维码已吊销",
+                batch_code=credential.batch_code,
+                batch_id=credential.batch_id,
+                failure_reason="credential_revoked",
+            )
+
+        try:
+            batch = Batch.objects.select_related("product").get(pk=credential.batch_id)
+        except Batch.DoesNotExist:
+            return cls._result(
+                status=QR_SCAN_STATUS_NOT_FOUND,
+                message="批次不存在",
+                batch_code=credential.batch_code,
+                batch_id=credential.batch_id,
+                failure_reason="batch_not_found",
+            )
+
+        return cls._result_for_batch(batch)
+
+    @staticmethod
+    def _parse_qr(qr: str) -> tuple[str, str] | None:
+        parts = qr.split("|")
+        if len(parts) != 3:
+            return None
+        prefix, batch_code, token = parts
+        if prefix != QR_CODE_PREFIX or not batch_code or not token:
+            return None
+        return batch_code, token
+
+    @classmethod
+    def _result_for_batch(cls, batch: Batch) -> dict:
+        remaining_days = calc_days_until_expiry(batch.expire_date)
+        if remaining_days is None:
+            status = QR_SCAN_STATUS_VALID
+            message = "该批次未设置到期日"
+        elif remaining_days < 0:
+            status = QR_SCAN_STATUS_EXPIRED
+            message = "该批次已过期"
+        elif remaining_days <= settings.QR_SCAN_NEAR_EXPIRY_DAYS:
+            status = QR_SCAN_STATUS_NEAR_EXPIRY
+            message = "该批次临近到期"
+        else:
+            status = QR_SCAN_STATUS_VALID
+            message = "该批次仍在效期内"
+
+        return cls._result(
+            status=status,
+            message=message,
+            batch_code=batch.batch_code,
+            batch_id=batch.id,
+            product_name=batch.product.product_name,
+            expire_date=batch.expire_date,
+            remaining_days=remaining_days,
+        )
+
+    @staticmethod
+    def _result(
+        *,
+        status: str,
+        message: str,
+        batch_code: str | None = None,
+        batch_id: int | None = None,
+        product_name: str | None = None,
+        expire_date=None,
+        remaining_days: int | None = None,
+        failure_reason: str | None = None,
+    ) -> dict:
+        return {
+            "batchCode": batch_code,
+            "productName": product_name,
+            "status": status,
+            "message": message,
+            "expireDate": _format_date(expire_date),
+            "remainingDays": remaining_days,
+            "_batch_id": batch_id,
+            "_failure_reason": failure_reason,
+        }
+
+    @staticmethod
+    def _public_result(result: dict, audit_id: str, *, client_scan_id: str | None = None) -> dict:
+        payload = {
+            "auditId": audit_id,
+            "batchCode": result.get("batchCode"),
+            "productName": result.get("productName"),
+            "status": result["status"],
+            "message": result["message"],
+            "expireDate": result.get("expireDate"),
+            "remainingDays": result.get("remainingDays"),
+        }
+        if client_scan_id:
+            payload["clientScanId"] = client_scan_id
+        return payload
+
+    @classmethod
+    def _apply_audit_result(cls, audit, result: dict) -> None:
+        audit.batch_id = result.get("_batch_id")
+        audit.batch_code = result.get("batchCode")
+        audit.result_status = result["status"]
+        audit.result_message = result["message"]
+        audit.failure_reason = result.get("_failure_reason")
+        audit.save(
+            update_fields=[
+                "batch_id",
+                "batch_code",
+                "result_status",
+                "result_message",
+                "failure_reason",
+            ]
+        )
+
+    @classmethod
+    def _result_from_audit(cls, audit, *, client_scan_id: str | None = None) -> dict:
+        product_name = None
+        expire_date = None
+        remaining_days = None
+        if audit.batch_id is not None:
+            try:
+                batch = Batch.objects.select_related("product").get(pk=audit.batch_id)
+            except Batch.DoesNotExist:
+                batch = None
+            if batch is not None:
+                product_name = batch.product.product_name
+                expire_date = _format_date(batch.expire_date)
+                remaining_days = calc_days_until_expiry(batch.expire_date)
+
+        result = {
+            "batchCode": audit.batch_code,
+            "productName": product_name,
+            "status": audit.result_status,
+            "message": audit.result_message,
+            "expireDate": expire_date,
+            "remainingDays": remaining_days,
+        }
+        return cls._public_result(result, audit.id, client_scan_id=client_scan_id)
+
+
 class BatchOperationService:
     decrease_operation_types = {"loss", "deduct"}
     reverse_operation_types = {
@@ -321,8 +645,9 @@ class BatchOperationService:
                 if quantity_after < Decimal("0"):
                     raise ConflictApiError("Insufficient batch quantity")
 
+                update_fields = cls._apply_batch_quantity_state(batch, quantity_after)
                 batch.quantity = quantity_after
-                batch.save(update_fields=["quantity"])
+                batch.save(update_fields=update_fields)
                 operation = BatchOperation.objects.create(
                     batch=batch,
                     reversed_operation=data.get("reversed_operation"),
@@ -364,8 +689,9 @@ class BatchOperationService:
                 if quantity_after < Decimal("0"):
                     raise ConflictApiError("Insufficient batch quantity")
 
+                update_fields = cls._apply_batch_quantity_state(batch, quantity_after)
                 batch.quantity = quantity_after
-                batch.save(update_fields=["quantity"])
+                batch.save(update_fields=update_fields)
                 reversal_operation = BatchOperation.objects.create(
                     batch=batch,
                     reversed_operation=original_operation,
@@ -391,6 +717,18 @@ class BatchOperationService:
         if operation_type in cls.decrease_operation_types:
             return current_quantity - quantity
         raise ConflictApiError("Unsupported batch operation")
+
+    @staticmethod
+    def _apply_batch_quantity_state(batch: Batch, quantity_after: Decimal) -> list[str]:
+        update_fields = ["quantity"]
+        if quantity_after == Decimal("0"):
+            if batch.status != "used_up":
+                batch.status = "used_up"
+                update_fields.append("status")
+        elif batch.status == "used_up":
+            batch.status = None
+            update_fields.append("status")
+        return update_fields
 
     @staticmethod
     def list_operations(*, batch_id: int, operation_type: str | None, page: int, size: int):

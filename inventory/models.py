@@ -62,3 +62,55 @@ class BatchOperation(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["reversed_operation"], name="batch_operations_reversed_operation_uniq"),
         ]
+
+
+class BatchQrCredential(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    batch = models.ForeignKey(Batch, on_delete=models.DO_NOTHING, related_name="qr_credentials", db_column="batch_id")
+    batch_code = models.CharField(max_length=255)
+    token_hash = models.CharField(max_length=64, unique=True)
+    issued_at = models.DateTimeField(blank=True, db_default=Now())
+    revoked_at = models.DateTimeField(blank=True, null=True)
+    created_by = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        managed = False
+        db_table = "batch_qr_credentials"
+        indexes = [
+            models.Index(fields=["batch", "revoked_at"], name="batch_qr_credentials_batch_revoked_idx"),
+            models.Index(fields=["batch_code"], name="batch_qr_credentials_code_idx"),
+        ]
+
+
+class QrScanAuditLog(models.Model):
+    id = models.CharField(max_length=40, primary_key=True)
+    raw_qr = models.TextField()
+    batch = models.ForeignKey(
+        Batch,
+        on_delete=models.DO_NOTHING,
+        related_name="qr_scan_audit_logs",
+        db_column="batch_id",
+        blank=True,
+        null=True,
+    )
+    batch_code = models.CharField(max_length=255, blank=True, null=True)
+    source = models.CharField(max_length=50)
+    device_id = models.CharField(max_length=255, blank=True, null=True)
+    client_scan_id = models.CharField(max_length=255, blank=True, null=True)
+    scanner_user = models.CharField(max_length=255, blank=True, null=True)
+    scanned_at_client = models.DateTimeField(blank=True, null=True)
+    scanned_at_server = models.DateTimeField(blank=True, db_default=Now())
+    ip_address = models.GenericIPAddressField(blank=True, null=True)
+    user_agent = models.TextField(blank=True, null=True)
+    result_status = models.CharField(max_length=20)
+    result_message = models.TextField()
+    failure_reason = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        managed = False
+        db_table = "qr_scan_audit_logs"
+        indexes = [
+            models.Index(fields=["batch", "-scanned_at_server"], name="qr_scan_audit_logs_batch_scanned_idx"),
+            models.Index(fields=["source", "device_id", "client_scan_id"], name="qr_scan_audit_logs_client_scan_idx"),
+            models.Index(fields=["result_status"], name="qr_scan_audit_logs_status_idx"),
+        ]

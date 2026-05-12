@@ -388,7 +388,7 @@ class InventoryApiTests(SimpleTestCase):
         )
         mock_list_expiry_alerts.assert_called_once_with(
             product_id=None,
-            status="unopened",
+            status=None,
             category=None,
             location=None,
             expiry_status=None,
@@ -436,6 +436,119 @@ class InventoryApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
 
+    @patch("inventory.views.QrCredentialService.build_label_payload")
+    def test_batch_label_payload_returns_printable_qr_code(self, mock_build_label_payload):
+        mock_build_label_payload.return_value = {
+            "batchCode": "BATCH-001",
+            "productName": "Milk",
+            "barcode": "123456",
+            "quantity": "8.50",
+            "location": "A-01",
+            "expireDate": "2026-05-06",
+            "qrCode": "OB1|BATCH-001|token",
+        }
+
+        response = self.client.get("/api/batches/3/label-payload")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["qrCode"], "OB1|BATCH-001|token")
+        mock_build_label_payload.assert_called_once_with(3)
+
+    @patch("inventory.views.QrScanService.scan_qr")
+    def test_qr_scan_returns_standard_scan_result(self, mock_scan_qr):
+        mock_scan_qr.return_value = {
+            "auditId": "scan_abc",
+            "batchCode": "BATCH-001",
+            "productName": "Milk",
+            "status": "valid",
+            "message": "该批次仍在效期内",
+            "expireDate": "2026-05-06",
+            "remainingDays": 9,
+            "clientScanId": "client-1",
+        }
+
+        response = self.client.post(
+            "/api/qr-scans",
+            {
+                "qr": "OB1|BATCH-001|token",
+                "source": "mobile_camera",
+                "deviceId": "device-001",
+                "clientScanId": "client-1",
+                "scannedAt": "2026-05-12T10:30:00+08:00",
+            },
+            format="json",
+            REMOTE_ADDR="127.0.0.1",
+            HTTP_USER_AGENT="api-test",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["auditId"], "scan_abc")
+        self.assertEqual(response.json()["data"]["clientScanId"], "client-1")
+        mock_scan_qr.assert_called_once()
+        scan_payload = mock_scan_qr.call_args.args[0]
+        self.assertEqual(scan_payload["qr"], "OB1|BATCH-001|token")
+        self.assertEqual(scan_payload["source"], "mobile_camera")
+        self.assertEqual(scan_payload["device_id"], "device-001")
+        self.assertEqual(scan_payload["client_scan_id"], "client-1")
+        self.assertIsNotNone(scan_payload["scanned_at"])
+        self.assertEqual(mock_scan_qr.call_args.args[1]["ip_address"], "127.0.0.1")
+        self.assertEqual(mock_scan_qr.call_args.args[1]["user_agent"], "api-test")
+
+    def test_qr_scan_rejects_invalid_source(self):
+        response = self.client.post(
+            "/api/qr-scans",
+            {
+                "qr": "OB1|BATCH-001|token",
+                "source": "unknown",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
+
+    @patch("inventory.views.QrScanService.scan_bulk")
+    def test_bulk_qr_scan_returns_item_results(self, mock_scan_bulk):
+        mock_scan_bulk.return_value = {
+            "items": [
+                {
+                    "auditId": "scan_1",
+                    "batchCode": "BATCH-001",
+                    "productName": "Milk",
+                    "status": "valid",
+                    "message": "该批次仍在效期内",
+                    "expireDate": "2026-05-06",
+                    "remainingDays": 9,
+                    "clientScanId": "client-1",
+                },
+                {
+                    "auditId": "scan_2",
+                    "batchCode": None,
+                    "productName": None,
+                    "status": "invalid",
+                    "message": "二维码格式错误",
+                    "expireDate": None,
+                    "remainingDays": None,
+                    "clientScanId": "client-2",
+                },
+            ]
+        }
+
+        response = self.client.post(
+            "/api/qr-scans/bulk",
+            {
+                "items": [
+                    {"qr": "OB1|BATCH-001|token", "source": "mobile_camera", "clientScanId": "client-1"},
+                    {"qr": "bad", "source": "mobile_camera", "clientScanId": "client-2"},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["items"][1]["status"], "invalid")
+        mock_scan_bulk.assert_called_once()
+
     @patch("inventory.views.BatchService.create_batch")
     def test_create_batch_translates_product_not_found(self, mock_create_batch):
         mock_create_batch.side_effect = NotFoundApiError("Product 404 not found")
@@ -467,7 +580,7 @@ class InventoryApiTests(SimpleTestCase):
                 reversed_operation_id=None,
                 is_reverted=False,
             ),
-            SimpleNamespace(id=3, quantity=Decimal("6.50")),
+            SimpleNamespace(id=3, quantity=Decimal("6.50"), status=None),
         )
 
         response = self.client.post(
@@ -501,6 +614,7 @@ class InventoryApiTests(SimpleTestCase):
                     "batch": {
                         "id": 3,
                         "quantity": "6.50",
+                        "status": None,
                     },
                 },
             },
@@ -557,7 +671,7 @@ class InventoryApiTests(SimpleTestCase):
                 reversed_operation_id=7,
                 is_reverted=False,
             ),
-            SimpleNamespace(id=3, quantity=Decimal("8.50")),
+            SimpleNamespace(id=3, quantity=Decimal("8.50"), status=None),
         )
 
         response = self.client.post(
@@ -587,6 +701,7 @@ class InventoryApiTests(SimpleTestCase):
                     "batch": {
                         "id": 3,
                         "quantity": "8.50",
+                        "status": None,
                     },
                 },
             },

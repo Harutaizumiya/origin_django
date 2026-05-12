@@ -1,3 +1,4 @@
+import hashlib
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -5,12 +6,12 @@ from unittest.mock import ANY, MagicMock, Mock, call
 from unittest.mock import patch
 
 from django.db import DatabaseError, IntegrityError
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from common.exceptions import ConflictApiError, NotFoundApiError
 from inventory.models import Batch, Product
 from inventory.expiry import calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
-from inventory.services import BatchOperationService, BatchService, ProductService
+from inventory.services import BatchOperationService, BatchService, ProductService, QrCredentialService, QrScanService
 
 
 class ExpiryCalculationTests(SimpleTestCase):
@@ -111,10 +112,13 @@ class ProductServiceTests(SimpleTestCase):
 
 
 class BatchServiceTests(SimpleTestCase):
+    @patch("inventory.services.QrCredentialService.issue_for_batch")
     @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.Batch.objects.create")
     @patch("inventory.services.Product.objects.get")
-    def test_create_batch_derives_expire_date_from_product_shelf_life(self, mock_product_get, mock_batch_create, mock_atomic):
+    def test_create_batch_derives_expire_date_from_product_shelf_life(
+        self, mock_product_get, mock_batch_create, mock_atomic, mock_issue_qr
+    ):
         mock_atomic.return_value.__enter__.return_value = None
         mock_product_get.return_value = SimpleNamespace(id=1, shelf_life_days=30)
         batch = Mock(id=2)
@@ -133,6 +137,7 @@ class BatchServiceTests(SimpleTestCase):
         payload = mock_batch_create.call_args.kwargs
         self.assertEqual(payload["expire_date"], date(2026, 5, 21))
         self.assertEqual(payload["product"].id, 1)
+        mock_issue_qr.assert_called_once_with(batch)
         batch.refresh_from_db.assert_called_once_with(fields=["received_at"])
 
     @patch("inventory.services.Product.objects.get")
@@ -148,11 +153,14 @@ class BatchServiceTests(SimpleTestCase):
                 }
             )
 
+    @patch("inventory.services.QrCredentialService.issue_for_batch")
     @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.BatchService._sync_batch_id_sequence")
     @patch("inventory.services.Batch.objects.create")
     @patch("inventory.services.Product.objects.get")
-    def test_create_batch_retries_after_sequence_sync(self, mock_product_get, mock_batch_create, mock_sync_sequence, mock_atomic):
+    def test_create_batch_retries_after_sequence_sync(
+        self, mock_product_get, mock_batch_create, mock_sync_sequence, mock_atomic, mock_issue_qr
+    ):
         mock_atomic.return_value.__enter__.return_value = None
         mock_product_get.return_value = SimpleNamespace(id=1, shelf_life_days=30)
         created_batch = Mock(id=5)
@@ -172,6 +180,7 @@ class BatchServiceTests(SimpleTestCase):
         self.assertEqual(batch.id, 5)
         self.assertEqual(mock_batch_create.call_count, 2)
         mock_sync_sequence.assert_called_once()
+        mock_issue_qr.assert_called_once_with(created_batch)
         created_batch.refresh_from_db.assert_called_once_with(fields=["received_at"])
 
     @patch("inventory.services.Batch.objects.select_related")
@@ -261,6 +270,188 @@ class BatchServiceTests(SimpleTestCase):
         self.assertEqual([batch.id for batch in batches], [1])
 
 
+class QrCredentialServiceTests(SimpleTestCase):
+    @override_settings(QR_TOKEN_PEPPER="pepper")
+    def test_hash_token_uses_server_pepper(self):
+        expected = hashlib.sha256("tokenpepper".encode("utf-8")).hexdigest()
+
+        self.assertEqual(QrCredentialService.hash_token("token"), expected)
+
+    @override_settings(QR_TOKEN_PEPPER="pepper")
+    @patch("inventory.services.BatchQrCredential.objects.create")
+    @patch("inventory.services.secrets.token_urlsafe")
+    def test_issue_for_batch_stores_hash_and_returns_qr_code(self, mock_token_urlsafe, mock_create):
+        mock_token_urlsafe.return_value = "plain-token"
+        credential = Mock()
+        mock_create.return_value = credential
+        batch = SimpleNamespace(id=3, batch_code="BATCH-001")
+
+        result_credential, qr_code = QrCredentialService.issue_for_batch(batch, created_by="tester")
+
+        self.assertIs(result_credential, credential)
+        self.assertEqual(qr_code, "OB1|BATCH-001|plain-token")
+        self.assertEqual(mock_create.call_args.kwargs["batch"], batch)
+        self.assertEqual(mock_create.call_args.kwargs["batch_code"], "BATCH-001")
+        self.assertEqual(mock_create.call_args.kwargs["created_by"], "tester")
+        self.assertEqual(
+            mock_create.call_args.kwargs["token_hash"],
+            hashlib.sha256("plain-tokenpepper".encode("utf-8")).hexdigest(),
+        )
+        self.assertNotIn("token", mock_create.call_args.kwargs)
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.QrCredentialService.issue_for_batch")
+    @patch("inventory.services.Batch.objects.exclude")
+    @patch("inventory.services.BatchQrCredential.objects.filter")
+    def test_backfill_skips_batches_with_active_credentials(
+        self, mock_filter, mock_exclude, mock_issue_for_batch, mock_atomic
+    ):
+        mock_atomic.return_value.__enter__.return_value = None
+        active_batch_ids = Mock()
+        mock_filter.return_value.values_list.return_value = active_batch_ids
+        batch = SimpleNamespace(id=3, batch_code="BATCH-001")
+        mock_exclude.return_value = [batch]
+
+        count = QrCredentialService.backfill_missing_credentials()
+
+        self.assertEqual(count, 1)
+        mock_filter.assert_called_once_with(revoked_at__isnull=True)
+        mock_filter.return_value.values_list.assert_called_once_with("batch_id", flat=True)
+        mock_exclude.assert_called_once_with(id__in=active_batch_ids)
+        mock_issue_for_batch.assert_called_once_with(batch, created_by="backfill")
+
+
+class QrScanServiceTests(SimpleTestCase):
+    @override_settings(QR_SCAN_NEAR_EXPIRY_DAYS=7)
+    @patch("inventory.expiry.timezone.localdate")
+    def test_result_for_batch_uses_server_date_and_near_expiry_threshold(self, mock_localdate):
+        mock_localdate.return_value = date(2026, 5, 12)
+        product = SimpleNamespace(product_name="Milk")
+
+        valid = QrScanService._result_for_batch(
+            SimpleNamespace(id=1, batch_code="BATCH-001", expire_date=date(2026, 5, 20), product=product)
+        )
+        near_expiry = QrScanService._result_for_batch(
+            SimpleNamespace(id=2, batch_code="BATCH-002", expire_date=date(2026, 5, 19), product=product)
+        )
+        expired = QrScanService._result_for_batch(
+            SimpleNamespace(id=3, batch_code="BATCH-003", expire_date=date(2026, 5, 11), product=product)
+        )
+
+        self.assertEqual(valid["status"], "valid")
+        self.assertEqual(valid["remainingDays"], 8)
+        self.assertEqual(near_expiry["status"], "near_expiry")
+        self.assertEqual(near_expiry["remainingDays"], 7)
+        self.assertEqual(expired["status"], "expired")
+        self.assertEqual(expired["remainingDays"], -1)
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.QrScanAuditLog.objects.create")
+    def test_scan_invalid_qr_records_audit_and_returns_invalid_result(self, mock_create_audit, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        audit = Mock(id="scan_1")
+        mock_create_audit.return_value = audit
+
+        result = QrScanService.scan_qr(
+            {"qr": "bad", "source": "mobile_camera"},
+            {"ip_address": "127.0.0.1", "user_agent": "api-test"},
+        )
+
+        self.assertEqual(result["status"], "invalid")
+        self.assertEqual(result["message"], "二维码格式错误")
+        self.assertEqual(mock_create_audit.call_args.kwargs["raw_qr"], "bad")
+        self.assertEqual(mock_create_audit.call_args.kwargs["ip_address"], "127.0.0.1")
+        self.assertEqual(audit.result_status, "invalid")
+        self.assertEqual(audit.failure_reason, "invalid_format")
+        audit.save.assert_called_once()
+
+    @override_settings(QR_TOKEN_PEPPER="pepper")
+    @patch("inventory.services.BatchQrCredential.objects.filter")
+    def test_scan_with_unknown_token_returns_invalid(self, mock_filter):
+        mock_filter.return_value.order_by.return_value.first.return_value = None
+
+        result = QrScanService._resolve_scan_result("OB1|BATCH-001|bad-token")
+
+        self.assertEqual(result["status"], "invalid")
+        self.assertEqual(result["batchCode"], "BATCH-001")
+        self.assertEqual(result["_failure_reason"], "token_mismatch")
+        mock_filter.assert_called_once_with(
+            batch_code="BATCH-001",
+            token_hash=hashlib.sha256("bad-tokenpepper".encode("utf-8")).hexdigest(),
+        )
+
+    @patch("inventory.services.BatchQrCredential.objects.filter")
+    def test_scan_with_revoked_credential_returns_revoked(self, mock_filter):
+        credential = SimpleNamespace(batch_id=3, batch_code="BATCH-001", revoked_at=object())
+        mock_filter.return_value.order_by.return_value.first.return_value = credential
+
+        result = QrScanService._resolve_scan_result("OB1|BATCH-001|token")
+
+        self.assertEqual(result["status"], "revoked")
+        self.assertEqual(result["_batch_id"], 3)
+        self.assertEqual(result["_failure_reason"], "credential_revoked")
+
+    @patch("inventory.services.Batch.objects.select_related")
+    @patch("inventory.services.BatchQrCredential.objects.filter")
+    def test_scan_with_missing_batch_returns_not_found(self, mock_filter, mock_select_related):
+        credential = SimpleNamespace(batch_id=3, batch_code="BATCH-001", revoked_at=None)
+        mock_filter.return_value.order_by.return_value.first.return_value = credential
+        mock_select_related.return_value.get.side_effect = Batch.DoesNotExist
+
+        result = QrScanService._resolve_scan_result("OB1|BATCH-001|token")
+
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["_batch_id"], 3)
+        self.assertEqual(result["_failure_reason"], "batch_not_found")
+
+    @patch("inventory.services.Batch.objects.select_related")
+    @patch("inventory.services.BatchQrCredential.objects.filter")
+    @patch("inventory.expiry.timezone.localdate")
+    def test_scan_with_valid_credential_returns_batch_status(self, mock_localdate, mock_filter, mock_select_related):
+        mock_localdate.return_value = date(2026, 5, 12)
+        credential = SimpleNamespace(batch_id=3, batch_code="BATCH-001", revoked_at=None)
+        batch = SimpleNamespace(
+            id=3,
+            batch_code="BATCH-001",
+            expire_date=date(2026, 8, 11),
+            product=SimpleNamespace(product_name="Milk"),
+        )
+        mock_filter.return_value.order_by.return_value.first.return_value = credential
+        mock_select_related.return_value.get.return_value = batch
+
+        result = QrScanService._resolve_scan_result("OB1|BATCH-001|token")
+
+        self.assertEqual(result["status"], "valid")
+        self.assertEqual(result["productName"], "Milk")
+        self.assertEqual(result["remainingDays"], 91)
+
+    @patch("inventory.services.QrScanAuditLog.objects.create")
+    @patch("inventory.services.QrScanAuditLog.objects.filter")
+    def test_duplicate_client_scan_id_returns_existing_result_without_new_audit(self, mock_filter, mock_create_audit):
+        audit = SimpleNamespace(
+            id="scan_existing",
+            batch_id=None,
+            batch_code="BATCH-001",
+            result_status="invalid",
+            result_message="二维码无效",
+        )
+        mock_filter.return_value.order_by.return_value.first.return_value = audit
+
+        result = QrScanService.scan_qr(
+            {
+                "qr": "OB1|BATCH-001|token",
+                "source": "mobile_camera",
+                "device_id": "device-001",
+                "client_scan_id": "client-1",
+            },
+            {},
+        )
+
+        self.assertEqual(result["auditId"], "scan_existing")
+        self.assertEqual(result["clientScanId"], "client-1")
+        mock_create_audit.assert_not_called()
+
+
 class BatchOperationServiceTests(SimpleTestCase):
     @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.BatchOperation.objects.create")
@@ -269,7 +460,7 @@ class BatchOperationServiceTests(SimpleTestCase):
         self, mock_select_for_update, mock_operation_create, mock_atomic
     ):
         mock_atomic.return_value.__enter__.return_value = None
-        batch = Mock(id=3, quantity=Decimal("8.50"))
+        batch = Mock(id=3, quantity=Decimal("8.50"), status="opened")
         mock_select_for_update.return_value.get.return_value = batch
         operation = Mock(id=9)
         mock_operation_create.return_value = operation
@@ -286,6 +477,7 @@ class BatchOperationServiceTests(SimpleTestCase):
         self.assertIs(result_operation, operation)
         self.assertIs(result_batch, batch)
         self.assertEqual(batch.quantity, Decimal("10.50"))
+        self.assertEqual(batch.status, "opened")
         batch.save.assert_called_once_with(update_fields=["quantity"])
         mock_operation_create.assert_called_once_with(
             batch=batch,
@@ -304,7 +496,7 @@ class BatchOperationServiceTests(SimpleTestCase):
         self, mock_select_for_update, mock_operation_create, mock_atomic
     ):
         mock_atomic.return_value.__enter__.return_value = None
-        batch = Mock(id=3, quantity=Decimal("8.50"))
+        batch = Mock(id=3, quantity=Decimal("8.50"), status="opened")
         mock_select_for_update.return_value.get.return_value = batch
         mock_operation_create.return_value = Mock()
 
@@ -320,10 +512,56 @@ class BatchOperationServiceTests(SimpleTestCase):
         self.assertEqual(mock_operation_create.call_args.kwargs["quantity_after"], Decimal("6.50"))
 
     @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects.create")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_operation_marks_batch_used_up_when_quantity_reaches_zero(
+        self, mock_select_for_update, mock_operation_create, mock_atomic
+    ):
+        mock_atomic.return_value.__enter__.return_value = None
+        batch = Mock(id=3, quantity=Decimal("2.00"), status="opened")
+        mock_select_for_update.return_value.get.return_value = batch
+        mock_operation_create.return_value = Mock()
+
+        BatchOperationService.create_operation(
+            3,
+            {
+                "operation_type": "deduct",
+                "quantity": Decimal("2.00"),
+            },
+        )
+
+        self.assertEqual(batch.quantity, Decimal("0"))
+        self.assertEqual(batch.status, "used_up")
+        batch.save.assert_called_once_with(update_fields=["quantity", "status"])
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects.create")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_add_operation_resets_used_up_batch_status_to_null(
+        self, mock_select_for_update, mock_operation_create, mock_atomic
+    ):
+        mock_atomic.return_value.__enter__.return_value = None
+        batch = Mock(id=3, quantity=Decimal("0"), status="used_up")
+        mock_select_for_update.return_value.get.return_value = batch
+        mock_operation_create.return_value = Mock()
+
+        BatchOperationService.create_operation(
+            3,
+            {
+                "operation_type": "add",
+                "quantity": Decimal("2.00"),
+            },
+        )
+
+        self.assertEqual(batch.quantity, Decimal("2.00"))
+        self.assertIsNone(batch.status)
+        batch.save.assert_called_once_with(update_fields=["quantity", "status"])
+
+    @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.Batch.objects.select_for_update")
     def test_create_operation_rejects_insufficient_quantity(self, mock_select_for_update, mock_atomic):
         mock_atomic.return_value.__enter__.return_value = None
-        batch = Mock(id=3, quantity=Decimal("1.00"))
+        batch = Mock(id=3, quantity=Decimal("1.00"), status="opened")
         mock_select_for_update.return_value.get.return_value = batch
 
         with self.assertRaises(ConflictApiError):
@@ -341,7 +579,7 @@ class BatchOperationServiceTests(SimpleTestCase):
     @patch("inventory.services.Batch.objects.select_for_update")
     def test_create_operation_rejects_null_batch_quantity(self, mock_select_for_update, mock_atomic):
         mock_atomic.return_value.__enter__.return_value = None
-        batch = Mock(id=3, quantity=None)
+        batch = Mock(id=3, quantity=None, status="opened")
         mock_select_for_update.return_value.get.return_value = batch
 
         with self.assertRaises(ConflictApiError):
@@ -414,7 +652,7 @@ class BatchOperationServiceTests(SimpleTestCase):
             quantity=Decimal("2.00"),
             reversed_operation_id=None,
         )
-        batch = Mock(id=3, quantity=Decimal("8.50"))
+        batch = Mock(id=3, quantity=Decimal("8.50"), status="opened")
         reversal_operation = Mock(id=8)
         mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
         mock_operation_objects.filter.return_value.exists.return_value = False
@@ -430,6 +668,7 @@ class BatchOperationServiceTests(SimpleTestCase):
         self.assertIs(result_operation, reversal_operation)
         self.assertIs(result_batch, batch)
         self.assertEqual(batch.quantity, Decimal("6.50"))
+        self.assertEqual(batch.status, "opened")
         batch.save.assert_called_once_with(update_fields=["quantity"])
         mock_operation_objects.create.assert_called_once_with(
             batch=batch,
@@ -453,7 +692,7 @@ class BatchOperationServiceTests(SimpleTestCase):
             quantity=Decimal("2.00"),
             reversed_operation_id=None,
         )
-        batch = Mock(id=3, quantity=Decimal("6.50"))
+        batch = Mock(id=3, quantity=Decimal("6.50"), status="opened")
         mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
         mock_operation_objects.filter.return_value.exists.return_value = False
         mock_operation_objects.create.return_value = Mock()
@@ -464,6 +703,32 @@ class BatchOperationServiceTests(SimpleTestCase):
         self.assertEqual(batch.quantity, Decimal("8.50"))
         self.assertEqual(mock_operation_objects.create.call_args.kwargs["operation_type"], "add")
         self.assertEqual(mock_operation_objects.create.call_args.kwargs["quantity_after"], Decimal("8.50"))
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_revert_operation_resets_used_up_batch_status_to_null(
+        self, mock_batch_select_for_update, mock_operation_objects, mock_atomic
+    ):
+        mock_atomic.return_value.__enter__.return_value = None
+        original_operation = Mock(
+            id=7,
+            batch_id=3,
+            operation_type="deduct",
+            quantity=Decimal("2.00"),
+            reversed_operation_id=None,
+        )
+        batch = Mock(id=3, quantity=Decimal("0"), status="used_up")
+        mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
+        mock_operation_objects.filter.return_value.exists.return_value = False
+        mock_operation_objects.create.return_value = Mock()
+        mock_batch_select_for_update.return_value.get.return_value = batch
+
+        BatchOperationService.revert_operation(batch_id=3, operation_id=7, data={})
+
+        self.assertEqual(batch.quantity, Decimal("2.00"))
+        self.assertIsNone(batch.status)
+        batch.save.assert_called_once_with(update_fields=["quantity", "status"])
 
     @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.BatchOperation.objects")
@@ -500,7 +765,7 @@ class BatchOperationServiceTests(SimpleTestCase):
             quantity=Decimal("2.00"),
             reversed_operation_id=None,
         )
-        batch = Mock(id=3, quantity=Decimal("1.00"))
+        batch = Mock(id=3, quantity=Decimal("1.00"), status="opened")
         mock_operation_objects.select_for_update.return_value.get.return_value = original_operation
         mock_operation_objects.filter.return_value.exists.return_value = False
         mock_batch_select_for_update.return_value.get.return_value = batch
