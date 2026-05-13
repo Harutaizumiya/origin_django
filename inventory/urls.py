@@ -1,6 +1,7 @@
 from django.urls import path
 
 from inventory.views import (
+    AnalyticsSummaryView,
     BatchCollectionView,
     BatchDetailView,
     BatchExpiryAlertsView,
@@ -8,6 +9,7 @@ from inventory.views import (
     BatchOperationCollectionView,
     BatchOperationRevertView,
     BatchStatusView,
+    DashboardOverviewView,
     ProductBarcodeDetailView,
     ProductBatchCollectionView,
     ProductCategoriesView,
@@ -18,6 +20,8 @@ from inventory.views import (
 )
 
 urlpatterns = [
+    path("dashboard/overview", DashboardOverviewView.as_view(), name="dashboard-overview"),
+    path("analytics/summary", AnalyticsSummaryView.as_view(), name="analytics-summary"),
     path("products", ProductCollectionView.as_view(), name="product-collection"),
     path("products/barcode/<str:barcode>", ProductBarcodeDetailView.as_view(), name="product-by-barcode"),
     path("products/categories", ProductCategoriesView.as_view(), name="product-categories"),

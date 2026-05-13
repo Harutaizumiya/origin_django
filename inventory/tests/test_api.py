@@ -18,6 +18,67 @@ class InventoryApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Origin Django")
 
+    @patch("inventory.views.DashboardService.get_overview")
+    def test_dashboard_overview_returns_standard_shape(self, mock_get_overview):
+        mock_get_overview.return_value = {
+            "current_inventory_quantity": Decimal("18.50"),
+            "near_expiry_batch_count": 1,
+            "expired_batch_count": 0,
+            "batch_health_rate": 0.5,
+            "expiry_trend_30d": [{"date": "2026-05-13", "batch_count": 1, "quantity": Decimal("8.50")}],
+            "category_inventory_distribution": [
+                {"category": "drink", "batch_count": 2, "quantity": Decimal("18.50"), "ratio": 1.0}
+            ],
+            "top_near_expiry_batches": [],
+        }
+
+        response = self.client.get("/api/dashboard/overview")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["current_inventory_quantity"], "18.50")
+        self.assertEqual(response.json()["data"]["near_expiry_batch_count"], 1)
+        self.assertEqual(response.json()["data"]["expiry_trend_30d"][0]["quantity"], "8.50")
+        mock_get_overview.assert_called_once_with()
+
+    @patch("inventory.views.AnalyticsService.get_summary")
+    def test_analytics_summary_returns_standard_shape(self, mock_get_summary):
+        mock_get_summary.return_value = {
+            "range": "6m",
+            "period": {"start": "2025-12-01", "end": "2026-05-13"},
+            "inventory_change_count": 3,
+            "current_month_loss_quantity": Decimal("2.00"),
+            "average_stock_age_days": 12.5,
+            "monthly_inventory_loss_trend": [
+                {
+                    "month": "2026-05",
+                    "inventory_quantity": Decimal("18.50"),
+                    "loss_quantity": Decimal("2.00"),
+                }
+            ],
+            "category_operation_summary": [
+                {
+                    "category": "drink",
+                    "inbound_quantity": Decimal("5.00"),
+                    "outbound_loss_quantity": Decimal("2.00"),
+                    "operation_count": 3,
+                }
+            ],
+            "high_risk_inventory_ranking": [],
+        }
+
+        response = self.client.get("/api/analytics/summary", {"range": "6m"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["inventory_change_count"], 3)
+        self.assertEqual(response.json()["data"]["current_month_loss_quantity"], "2.00")
+        mock_get_summary.assert_called_once_with(range_value="6m")
+
+    def test_analytics_summary_rejects_invalid_range(self):
+        response = self.client.get("/api/analytics/summary", {"range": "2y"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
+
     @patch("inventory.views.ProductService.list_products")
     def test_list_products_returns_standard_shape(self, mock_list_products):
         mock_list_products.return_value = ([], 0)

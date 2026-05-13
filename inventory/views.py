@@ -1,6 +1,8 @@
 from common.responses import success_response
 from common.views import ServiceAPIView
 from inventory.schemas import (
+    AnalyticsSummaryQuerySerializer,
+    AnalyticsSummarySerializer,
     BatchCreateSerializer,
     ExpiryAlertQuerySerializer,
     BatchListQuerySerializer,
@@ -14,6 +16,7 @@ from inventory.schemas import (
     BatchStatusUpdateSerializer,
     BatchUpdateSerializer,
     CategoryQuerySerializer,
+    DashboardOverviewSerializer,
     ProductCreateSerializer,
     ProductBatchListQuerySerializer,
     ProductListQuerySerializer,
@@ -24,7 +27,15 @@ from inventory.schemas import (
     QrScanRequestSerializer,
     QrScanResultSerializer,
 )
-from inventory.services import BatchOperationService, BatchService, ProductService, QrCredentialService, QrScanService
+from inventory.services import (
+    AnalyticsService,
+    BatchOperationService,
+    BatchService,
+    DashboardService,
+    ProductService,
+    QrCredentialService,
+    QrScanService,
+)
 
 
 def paginated_payload(*, items, page: int, size: int, total: int):
@@ -60,6 +71,22 @@ def scan_request_context(request) -> dict:
         "user_agent": request.META.get("HTTP_USER_AGENT", ""),
         "scanner_user": scanner_user,
     }
+
+
+class DashboardOverviewView(ServiceAPIView):
+    def get(self, request):
+        overview = DashboardService.get_overview()
+        serializer = DashboardOverviewSerializer(overview)
+        return success_response(serializer.data)
+
+
+class AnalyticsSummaryView(ServiceAPIView):
+    def get(self, request):
+        query = AnalyticsSummaryQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        summary = AnalyticsService.get_summary(range_value=query.validated_data["range"])
+        serializer = AnalyticsSummarySerializer(summary)
+        return success_response(serializer.data)
 
 
 class ProductCollectionView(ServiceAPIView):

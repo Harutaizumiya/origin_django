@@ -83,6 +83,10 @@ class ExpiryAlertQuerySerializer(serializers.Serializer):
     size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
 
 
+class AnalyticsSummaryQuerySerializer(serializers.Serializer):
+    range = serializers.ChoiceField(required=False, default="6m", choices=("1m", "3m", "6m", "12m"))
+
+
 class BatchCreateSerializer(serializers.Serializer):
     product_id = serializers.IntegerField(min_value=1)
     batch_code = serializers.CharField(required=False, allow_blank=False)
@@ -260,3 +264,55 @@ class BatchOperationOutputSerializer(serializers.ModelSerializer):
             "reversed_operation_id",
             "is_reverted",
         ]
+
+
+class ExpiryTrendPointSerializer(serializers.Serializer):
+    date = serializers.CharField()
+    batch_count = serializers.IntegerField()
+    quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+
+
+class CategoryInventoryDistributionSerializer(serializers.Serializer):
+    category = serializers.CharField()
+    batch_count = serializers.IntegerField()
+    quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+    ratio = serializers.FloatField()
+
+
+class DashboardOverviewSerializer(serializers.Serializer):
+    current_inventory_quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+    near_expiry_batch_count = serializers.IntegerField()
+    expired_batch_count = serializers.IntegerField()
+    batch_health_rate = serializers.FloatField()
+    expiry_trend_30d = ExpiryTrendPointSerializer(many=True)
+    category_inventory_distribution = CategoryInventoryDistributionSerializer(many=True)
+    top_near_expiry_batches = BatchOutputSerializer(many=True)
+
+
+class AnalyticsPeriodSerializer(serializers.Serializer):
+    start = serializers.CharField()
+    end = serializers.CharField()
+
+
+class MonthlyInventoryLossTrendSerializer(serializers.Serializer):
+    month = serializers.CharField()
+    inventory_quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+    loss_quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+
+
+class CategoryOperationSummarySerializer(serializers.Serializer):
+    category = serializers.CharField()
+    inbound_quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+    outbound_loss_quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+    operation_count = serializers.IntegerField()
+
+
+class AnalyticsSummarySerializer(serializers.Serializer):
+    range = serializers.CharField()
+    period = AnalyticsPeriodSerializer()
+    inventory_change_count = serializers.IntegerField()
+    current_month_loss_quantity = serializers.DecimalField(max_digits=18, decimal_places=2)
+    average_stock_age_days = serializers.FloatField(allow_null=True)
+    monthly_inventory_loss_trend = MonthlyInventoryLossTrendSerializer(many=True)
+    category_operation_summary = CategoryOperationSummarySerializer(many=True)
+    high_risk_inventory_ranking = BatchOutputSerializer(many=True)

@@ -1,5 +1,5 @@
 import hashlib
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, Mock, call
@@ -11,7 +11,15 @@ from django.test import SimpleTestCase, override_settings
 from common.exceptions import ConflictApiError, NotFoundApiError
 from inventory.models import Batch, Product
 from inventory.expiry import calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
-from inventory.services import BatchOperationService, BatchService, ProductService, QrCredentialService, QrScanService
+from inventory.services import (
+    AnalyticsService,
+    BatchOperationService,
+    BatchService,
+    DashboardService,
+    ProductService,
+    QrCredentialService,
+    QrScanService,
+)
 
 
 class ExpiryCalculationTests(SimpleTestCase):
@@ -268,6 +276,115 @@ class BatchServiceTests(SimpleTestCase):
 
         self.assertEqual(total, 1)
         self.assertEqual([batch.id for batch in batches], [1])
+
+
+class DashboardServiceTests(SimpleTestCase):
+    @patch("inventory.services.timezone.localdate")
+    @patch.object(DashboardService, "_active_batches")
+    def test_get_overview_aggregates_active_inventory_risk_and_distribution(
+        self,
+        mock_active_batches,
+        mock_localdate,
+    ):
+        mock_localdate.return_value = date(2026, 5, 13)
+        mock_active_batches.return_value = [
+            fake_batch(
+                1,
+                status="unopened",
+                quantity=Decimal("10.00"),
+                received_at=date(2026, 5, 1),
+                manufacture_date=date(2026, 4, 25),
+                expire_date=date(2026, 5, 15),
+                category="drink",
+            ),
+            fake_batch(
+                2,
+                status="opened",
+                quantity=Decimal("5.00"),
+                received_at=date(2026, 4, 1),
+                manufacture_date=date(2026, 4, 1),
+                expire_date=date(2026, 5, 12),
+                category="drink",
+            ),
+            fake_batch(
+                3,
+                status="opened",
+                quantity=Decimal("2.00"),
+                received_at=date(2026, 5, 10),
+                manufacture_date=date(2026, 5, 1),
+                expire_date=date(2026, 6, 30),
+                category="snack",
+            ),
+        ]
+
+        overview = DashboardService.get_overview()
+
+        self.assertEqual(overview["current_inventory_quantity"], Decimal("17.00"))
+        self.assertEqual(overview["near_expiry_batch_count"], 1)
+        self.assertEqual(overview["expired_batch_count"], 1)
+        self.assertEqual(overview["batch_health_rate"], 0.3333)
+        self.assertEqual([batch.id for batch in overview["top_near_expiry_batches"]], [1])
+        may_15 = next(item for item in overview["expiry_trend_30d"] if item["date"] == "2026-05-15")
+        self.assertEqual(may_15["batch_count"], 1)
+        self.assertEqual(may_15["quantity"], Decimal("10.00"))
+        self.assertEqual(overview["category_inventory_distribution"][0]["category"], "drink")
+        self.assertEqual(overview["category_inventory_distribution"][0]["quantity"], Decimal("15.00"))
+
+
+class AnalyticsServiceTests(SimpleTestCase):
+    @patch("inventory.services.timezone.localdate")
+    @patch.object(AnalyticsService, "_effective_operations")
+    @patch.object(AnalyticsService, "_active_batches")
+    def test_get_summary_aggregates_range_operations_and_current_inventory(
+        self,
+        mock_active_batches,
+        mock_effective_operations,
+        mock_localdate,
+    ):
+        mock_localdate.return_value = date(2026, 5, 13)
+        mock_active_batches.return_value = [
+            fake_batch(
+                1,
+                status="unopened",
+                quantity=Decimal("10.00"),
+                received_at=datetime(2026, 5, 1, 9, 0, 0),
+                manufacture_date=date(2026, 4, 25),
+                expire_date=date(2026, 5, 15),
+                category="drink",
+            ),
+            fake_batch(
+                2,
+                status="opened",
+                quantity=Decimal("4.00"),
+                received_at=datetime(2026, 4, 10, 9, 0, 0),
+                manufacture_date=date(2026, 5, 1),
+                expire_date=date(2026, 6, 1),
+                category="snack",
+            ),
+        ]
+        mock_effective_operations.return_value = [
+            fake_operation("loss", Decimal("2.00"), datetime(2026, 5, 5, 10, 0, 0), category="drink"),
+            fake_operation("deduct", Decimal("1.00"), datetime(2026, 4, 20, 10, 0, 0), category="drink"),
+            fake_operation("add", Decimal("5.00"), datetime(2026, 4, 15, 10, 0, 0), category="snack"),
+        ]
+
+        summary = AnalyticsService.get_summary(range_value="3m")
+
+        self.assertEqual(summary["period"], {"start": "2026-03-01", "end": "2026-05-13"})
+        self.assertEqual(summary["inventory_change_count"], 3)
+        self.assertEqual(summary["current_month_loss_quantity"], Decimal("2.00"))
+        self.assertEqual(summary["average_stock_age_days"], 22.5)
+        april = next(item for item in summary["monthly_inventory_loss_trend"] if item["month"] == "2026-04")
+        may = next(item for item in summary["monthly_inventory_loss_trend"] if item["month"] == "2026-05")
+        self.assertEqual(april["inventory_quantity"], Decimal("4.00"))
+        self.assertEqual(april["loss_quantity"], Decimal("0"))
+        self.assertEqual(may["inventory_quantity"], Decimal("10.00"))
+        self.assertEqual(may["loss_quantity"], Decimal("2.00"))
+        drink_summary = next(item for item in summary["category_operation_summary"] if item["category"] == "drink")
+        self.assertEqual(drink_summary["inbound_quantity"], Decimal("0"))
+        self.assertEqual(drink_summary["outbound_loss_quantity"], Decimal("3.00"))
+        self.assertEqual(drink_summary["operation_count"], 2)
+        self.assertEqual([batch.id for batch in summary["high_risk_inventory_ranking"]], [1, 2])
 
 
 class QrCredentialServiceTests(SimpleTestCase):
@@ -782,6 +899,8 @@ def fake_batch(
     status,
     manufacture_date,
     expire_date,
+    quantity=Decimal("1.00"),
+    received_at=None,
     shelf_life_days=20,
     category="drink",
     location="A-01",
@@ -789,10 +908,32 @@ def fake_batch(
     return SimpleNamespace(
         id=batch_id,
         product_id=1,
+        batch_code=f"BATCH-{batch_id:03d}",
+        quantity=quantity,
+        received_at=received_at,
         status=status,
+        remarks=None,
         manufacture_date=manufacture_date,
         expire_date=expire_date,
-        product=SimpleNamespace(shelf_life_days=shelf_life_days, category=category, location=location),
+        product=SimpleNamespace(
+            id=1,
+            barcode="123456",
+            product_name="Milk",
+            unit="box",
+            manufacturer="Factory",
+            shelf_life_days=shelf_life_days,
+            category=category,
+            location=location,
+        ),
+    )
+
+
+def fake_operation(operation_type, quantity, created_at, *, category="drink"):
+    return SimpleNamespace(
+        operation_type=operation_type,
+        quantity=quantity,
+        created_at=created_at,
+        batch=SimpleNamespace(product=SimpleNamespace(category=category)),
     )
 
 

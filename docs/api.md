@@ -139,6 +139,65 @@
 | `reversed_operation_id` | integer \| null | 被撤销的原操作 ID；普通操作为 `null` |
 | `is_reverted` | boolean | 当前操作是否已经被撤销 |
 
+### DashboardOverview
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `current_inventory_quantity` | string | 当前在库总数量，只统计 `quantity > 0` 且 `status != used_up` 的批次 |
+| `near_expiry_batch_count` | integer | 7 天内临期批次数，按 `0 <= days_until_expiry <= 7` 统计 |
+| `expired_batch_count` | integer | 已过期批次数，按 `days_until_expiry < 0` 或 `expiry_status = expired` 统计 |
+| `batch_health_rate` | number | 批次健康率，健康批次数 / 当前在库批次数，保留 4 位小数；无在库批次时为 `1.0` |
+| `expiry_trend_30d` | ExpiryTrendPoint[] | 未来 30 天到期趋势，含今日和第 30 天 |
+| `category_inventory_distribution` | CategoryInventoryDistribution[] | 品类在库分布 |
+| `top_near_expiry_batches` | Batch[] | Top 5 临期批次，按剩余天数升序排序 |
+
+### ExpiryTrendPoint
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `date` | string | 日期，`YYYY-MM-DD` |
+| `batch_count` | integer | 当天到期批次数 |
+| `quantity` | string | 当天到期批次当前在库数量 |
+
+### CategoryInventoryDistribution
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `category` | string | 商品分类；空分类统一返回 `未分类` |
+| `batch_count` | integer | 当前在库批次数 |
+| `quantity` | string | 当前在库数量 |
+| `ratio` | number | 该品类数量占当前在库总数量比例，保留 4 位小数 |
+
+### AnalyticsSummary
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `range` | string | 汇总范围，当前支持 `1m`、`3m`、`6m`、`12m` |
+| `period` | object | 统计周期，`start` 为起始月份 1 日，`end` 为服务端当前日期 |
+| `inventory_change_count` | integer | 库存变动次数，按有效 `batch_operations` 统计 |
+| `current_month_loss_quantity` | string | 当月报损数量，按有效 `loss` 操作数量汇总 |
+| `average_stock_age_days` | number \| null | 当前在库批次平均库龄，按 `received_at` 到当前日期的批次平均计算 |
+| `monthly_inventory_loss_trend` | MonthlyInventoryLossTrend[] | 月度在库数量/报损数量趋势 |
+| `category_operation_summary` | CategoryOperationSummary[] | 品类入库与出库/报损操作量 |
+| `high_risk_inventory_ranking` | Batch[] | 高风险库存排行，最多 10 条 |
+
+### MonthlyInventoryLossTrend
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `month` | string | 月份，`YYYY-MM` |
+| `inventory_quantity` | string | 当前在库批次按 `received_at` 所属月份汇总的数量 |
+| `loss_quantity` | string | 当月有效报损数量 |
+
+### CategoryOperationSummary
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `category` | string | 商品分类；空分类统一返回 `未分类` |
+| `inbound_quantity` | string | 有效 `add` 操作数量 |
+| `outbound_loss_quantity` | string | 有效 `deduct + loss` 操作数量 |
+| `operation_count` | integer | 该品类有效操作次数 |
+
 ### BatchQuantitySummary
 
 | 字段 | 类型 | 说明 |
@@ -207,6 +266,115 @@
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | integer | 被删除资源的 ID |
+
+## 看板接口
+
+### GET `/dashboard/overview`
+
+查询库存看板总览。
+
+聚合口径：
+- 只统计 `quantity > 0` 且 `status != used_up` 的批次。
+- 临期：`0 <= days_until_expiry <= 7`。
+- 已过期：`days_until_expiry < 0` 或 `expiry_status = expired`。
+- 批次健康率：既非临期也非已过期的当前在库批次数 / 当前在库批次数。
+- 未来 30 天到期趋势包含服务端当前日期和第 30 天，共 31 个日期桶。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "current_inventory_quantity": "42.50",
+    "near_expiry_batch_count": 3,
+    "expired_batch_count": 1,
+    "batch_health_rate": 0.875,
+    "expiry_trend_30d": [
+      {
+        "date": "2026-05-13",
+        "batch_count": 1,
+        "quantity": "8.50"
+      }
+    ],
+    "category_inventory_distribution": [
+      {
+        "category": "饮料",
+        "batch_count": 4,
+        "quantity": "28.50",
+        "ratio": 0.6706
+      }
+    ],
+    "top_near_expiry_batches": []
+  }
+}
+```
+
+返回字段结构：
+- `data`：`DashboardOverview`
+
+常见错误：
+- `409 / 4091 / conflict`
+
+## 分析接口
+
+### GET `/analytics/summary`
+
+查询库存分析汇总。
+
+请求参数：
+- `range`：可选，默认 `6m`；当前支持 `1m`、`3m`、`6m`、`12m`
+
+聚合口径：
+- 当前在库类指标只统计 `quantity > 0` 且 `status != used_up` 的批次。
+- 有效操作会排除撤销操作本身，以及已经被撤销的原操作。
+- 报损数量：有效 `batch_operations.operation_type = loss` 的数量。
+- 出库/报损量：有效 `deduct + loss` 操作数量。
+- 平均库龄：按当前在库批次的 `received_at` 到服务端当前日期计算批次平均，暂不做数量加权。
+- 月度在库数量：按当前在库批次的 `received_at` 所属月份汇总当前数量；该值不是历史库存快照。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "range": "6m",
+    "period": {
+      "start": "2025-12-01",
+      "end": "2026-05-13"
+    },
+    "inventory_change_count": 12,
+    "current_month_loss_quantity": "3.00",
+    "average_stock_age_days": 18.5,
+    "monthly_inventory_loss_trend": [
+      {
+        "month": "2026-05",
+        "inventory_quantity": "42.50",
+        "loss_quantity": "3.00"
+      }
+    ],
+    "category_operation_summary": [
+      {
+        "category": "饮料",
+        "inbound_quantity": "12.00",
+        "outbound_loss_quantity": "5.00",
+        "operation_count": 6
+      }
+    ],
+    "high_risk_inventory_ranking": []
+  }
+}
+```
+
+返回字段结构：
+- `data`：`AnalyticsSummary`
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `409 / 4091 / conflict`
 
 ## 商品接口
 

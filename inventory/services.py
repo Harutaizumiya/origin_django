@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -12,7 +12,13 @@ from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from common.exceptions import ConflictApiError, NotFoundApiError
-from inventory.expiry import ALERT_EXPIRY_STATUSES, calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
+from inventory.expiry import (
+    ALERT_EXPIRY_STATUSES,
+    EXPIRY_STATUS_EXPIRED,
+    calc_days_until_expiry,
+    calc_expiry_progress,
+    calc_expiry_status,
+)
 from inventory.models import Batch, BatchOperation, BatchQrCredential, Product, QrScanAuditLog
 
 
@@ -52,6 +58,108 @@ def _format_decimal(value) -> str | None:
     if value is None:
         return None
     return f"{Decimal(value):.2f}"
+
+
+def _decimal_or_zero(value) -> Decimal:
+    if value is None:
+        return Decimal("0")
+    return Decimal(str(value))
+
+
+def _obj_value(obj, field: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(field, default)
+    return getattr(obj, field, default)
+
+
+def _product_value(batch, field: str, default=None):
+    product = _obj_value(batch, "product")
+    if product is None:
+        return default
+    return _obj_value(product, field, default)
+
+
+def _category_name(value) -> str:
+    return value or "未分类"
+
+
+def _as_local_date(value) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if timezone.is_aware(value):
+            return timezone.localtime(value).date()
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value[:10])
+    return None
+
+
+def _month_start(value: date) -> date:
+    return date(value.year, value.month, 1)
+
+
+def _add_months(value: date, months: int) -> date:
+    month_index = value.year * 12 + value.month - 1 + months
+    return date(month_index // 12, month_index % 12 + 1, 1)
+
+
+def _month_label(value: date) -> str:
+    return f"{value.year:04d}-{value.month:02d}"
+
+
+def _month_starts(*, end_month: date, months: int) -> list[date]:
+    start_month = _add_months(end_month, -(months - 1))
+    return [_add_months(start_month, index) for index in range(months)]
+
+
+def _start_of_day(value: date) -> datetime:
+    return timezone.make_aware(datetime.combine(value, time.min), timezone.get_current_timezone())
+
+
+def _batch_days_until_expiry(batch, today: date) -> int | None:
+    return calc_days_until_expiry(_obj_value(batch, "expire_date"), today)
+
+
+def _batch_expiry_progress(batch, today: date) -> float | None:
+    return calc_expiry_progress(
+        _obj_value(batch, "manufacture_date"),
+        _product_value(batch, "shelf_life_days"),
+        today,
+    )
+
+
+def _batch_expiry_status(batch, today: date) -> str:
+    return calc_expiry_status(
+        _obj_value(batch, "manufacture_date"),
+        _product_value(batch, "shelf_life_days"),
+        today,
+    )
+
+
+def _is_near_expiry_batch(batch, today: date) -> bool:
+    days = _batch_days_until_expiry(batch, today)
+    return days is not None and 0 <= days <= 7
+
+
+def _is_expired_batch(batch, today: date) -> bool:
+    days = _batch_days_until_expiry(batch, today)
+    return (days is not None and days < 0) or _batch_expiry_status(batch, today) == EXPIRY_STATUS_EXPIRED
+
+
+def _expiry_sort_key(batch, today: date):
+    days = _batch_days_until_expiry(batch, today)
+    progress = _batch_expiry_progress(batch, today) or 0
+    quantity = _decimal_or_zero(_obj_value(batch, "quantity"))
+    return (
+        days is None,
+        days if days is not None else 999999,
+        -progress,
+        -quantity,
+        -(_obj_value(batch, "id") or 0),
+    )
 
 
 class ProductService:
@@ -150,6 +258,241 @@ class ProductService:
             return list(queryset.order_by("category").values_list("category", flat=True).distinct())
         except DatabaseError as exc:
             _raise_conflict("Unable to list categories", exc)
+
+
+class DashboardService:
+    @staticmethod
+    def _active_batches() -> list:
+        return list(
+            Batch.objects.select_related("product")
+            .filter(quantity__gt=Decimal("0"))
+            .exclude(status="used_up")
+        )
+
+    @classmethod
+    def get_overview(cls) -> dict:
+        try:
+            today = timezone.localdate()
+            batches = cls._active_batches()
+            total_quantity = sum((_decimal_or_zero(_obj_value(batch, "quantity")) for batch in batches), Decimal("0"))
+            near_expiry_batches = [batch for batch in batches if _is_near_expiry_batch(batch, today)]
+            expired_batches = [batch for batch in batches if _is_expired_batch(batch, today)]
+            healthy_batches = [
+                batch
+                for batch in batches
+                if not _is_near_expiry_batch(batch, today) and not _is_expired_batch(batch, today)
+            ]
+
+            return {
+                "current_inventory_quantity": total_quantity,
+                "near_expiry_batch_count": len(near_expiry_batches),
+                "expired_batch_count": len(expired_batches),
+                "batch_health_rate": cls._health_rate(len(healthy_batches), len(batches)),
+                "expiry_trend_30d": cls._expiry_trend_30d(batches, today),
+                "category_inventory_distribution": cls._category_inventory_distribution(batches, total_quantity),
+                "top_near_expiry_batches": sorted(near_expiry_batches, key=lambda batch: _expiry_sort_key(batch, today))[
+                    :5
+                ],
+            }
+        except DatabaseError as exc:
+            _raise_conflict("Unable to build dashboard overview", exc)
+
+    @staticmethod
+    def _health_rate(healthy_count: int, total_count: int) -> float:
+        if total_count == 0:
+            return 1.0
+        return round(healthy_count / total_count, 4)
+
+    @staticmethod
+    def _expiry_trend_30d(batches: list, today: date) -> list[dict]:
+        buckets = {
+            today + timedelta(days=offset): {
+                "date": (today + timedelta(days=offset)).isoformat(),
+                "batch_count": 0,
+                "quantity": Decimal("0"),
+            }
+            for offset in range(31)
+        }
+        for batch in batches:
+            expire_date = _as_local_date(_obj_value(batch, "expire_date"))
+            if expire_date not in buckets:
+                continue
+            bucket = buckets[expire_date]
+            bucket["batch_count"] += 1
+            bucket["quantity"] += _decimal_or_zero(_obj_value(batch, "quantity"))
+        return list(buckets.values())
+
+    @staticmethod
+    def _category_inventory_distribution(batches: list, total_quantity: Decimal) -> list[dict]:
+        buckets: dict[str, dict] = {}
+        for batch in batches:
+            category = _category_name(_product_value(batch, "category"))
+            bucket = buckets.setdefault(
+                category,
+                {"category": category, "batch_count": 0, "quantity": Decimal("0"), "ratio": 0.0},
+            )
+            bucket["batch_count"] += 1
+            bucket["quantity"] += _decimal_or_zero(_obj_value(batch, "quantity"))
+
+        for bucket in buckets.values():
+            if total_quantity > 0:
+                bucket["ratio"] = round(float(bucket["quantity"] / total_quantity), 4)
+
+        return sorted(buckets.values(), key=lambda item: (-item["quantity"], item["category"]))
+
+
+class AnalyticsService:
+    range_month_choices = {"1m": 1, "3m": 3, "6m": 6, "12m": 12}
+
+    @staticmethod
+    def _active_batches() -> list:
+        return DashboardService._active_batches()
+
+    @staticmethod
+    def _effective_operations(start_at: datetime, end_at: datetime) -> list:
+        reversal_queryset = BatchOperation.objects.filter(reversed_operation_id=OuterRef("pk"))
+        return list(
+            BatchOperation.objects.select_related("batch__product")
+            .filter(created_at__gte=start_at, created_at__lt=end_at)
+            .annotate(is_reverted=Exists(reversal_queryset))
+            .filter(reversed_operation_id__isnull=True, is_reverted=False)
+        )
+
+    @classmethod
+    def get_summary(cls, *, range_value: str = "6m") -> dict:
+        try:
+            today = timezone.localdate()
+            months = cls.range_month_choices[range_value]
+            current_month = _month_start(today)
+            months_in_range = _month_starts(end_month=current_month, months=months)
+            period_start = months_in_range[0]
+            period_end = today
+            start_at = _start_of_day(period_start)
+            end_at = _start_of_day(period_end + timedelta(days=1))
+            active_batches = cls._active_batches()
+            operations = cls._effective_operations(start_at, end_at)
+
+            return {
+                "range": range_value,
+                "period": {
+                    "start": period_start.isoformat(),
+                    "end": period_end.isoformat(),
+                },
+                "inventory_change_count": len(operations),
+                "current_month_loss_quantity": cls._loss_quantity(
+                    operations,
+                    start_date=current_month,
+                    end_date=period_end,
+                ),
+                "average_stock_age_days": cls._average_stock_age_days(active_batches, today),
+                "monthly_inventory_loss_trend": cls._monthly_inventory_loss_trend(
+                    active_batches,
+                    operations,
+                    months_in_range,
+                    period_end,
+                ),
+                "category_operation_summary": cls._category_operation_summary(operations),
+                "high_risk_inventory_ranking": cls._high_risk_inventory_ranking(active_batches, today),
+            }
+        except DatabaseError as exc:
+            _raise_conflict("Unable to build analytics summary", exc)
+
+    @staticmethod
+    def _loss_quantity(operations: list, *, start_date: date, end_date: date) -> Decimal:
+        total = Decimal("0")
+        for operation in operations:
+            operation_date = _as_local_date(_obj_value(operation, "created_at"))
+            if operation_date is None or not start_date <= operation_date <= end_date:
+                continue
+            if _obj_value(operation, "operation_type") == "loss":
+                total += _decimal_or_zero(_obj_value(operation, "quantity"))
+        return total
+
+    @staticmethod
+    def _average_stock_age_days(active_batches: list, today: date) -> float | None:
+        ages: list[int] = []
+        for batch in active_batches:
+            received_date = _as_local_date(_obj_value(batch, "received_at"))
+            if received_date is None:
+                continue
+            ages.append((today - received_date).days)
+        if not ages:
+            return None
+        return round(sum(ages) / len(ages), 1)
+
+    @staticmethod
+    def _monthly_inventory_loss_trend(
+        active_batches: list,
+        operations: list,
+        months_in_range: list[date],
+        period_end: date,
+    ) -> list[dict]:
+        month_keys = {_month_label(month): month for month in months_in_range}
+        buckets = {
+            _month_label(month): {
+                "month": _month_label(month),
+                "inventory_quantity": Decimal("0"),
+                "loss_quantity": Decimal("0"),
+            }
+            for month in months_in_range
+        }
+
+        for batch in active_batches:
+            received_date = _as_local_date(_obj_value(batch, "received_at"))
+            if received_date is None or received_date > period_end:
+                continue
+            month = _month_label(_month_start(received_date))
+            if month in month_keys:
+                buckets[month]["inventory_quantity"] += _decimal_or_zero(_obj_value(batch, "quantity"))
+
+        for operation in operations:
+            operation_date = _as_local_date(_obj_value(operation, "created_at"))
+            if operation_date is None or operation_date > period_end:
+                continue
+            month = _month_label(_month_start(operation_date))
+            if month in month_keys and _obj_value(operation, "operation_type") == "loss":
+                buckets[month]["loss_quantity"] += _decimal_or_zero(_obj_value(operation, "quantity"))
+
+        return list(buckets.values())
+
+    @staticmethod
+    def _category_operation_summary(operations: list) -> list[dict]:
+        buckets: dict[str, dict] = {}
+        for operation in operations:
+            batch = _obj_value(operation, "batch")
+            category = _category_name(_product_value(batch, "category"))
+            bucket = buckets.setdefault(
+                category,
+                {
+                    "category": category,
+                    "inbound_quantity": Decimal("0"),
+                    "outbound_loss_quantity": Decimal("0"),
+                    "operation_count": 0,
+                },
+            )
+            operation_type = _obj_value(operation, "operation_type")
+            quantity = _decimal_or_zero(_obj_value(operation, "quantity"))
+            if operation_type == "add":
+                bucket["inbound_quantity"] += quantity
+            elif operation_type in BatchOperationService.decrease_operation_types:
+                bucket["outbound_loss_quantity"] += quantity
+            bucket["operation_count"] += 1
+
+        return sorted(
+            buckets.values(),
+            key=lambda item: (-(item["inbound_quantity"] + item["outbound_loss_quantity"]), item["category"]),
+        )
+
+    @staticmethod
+    def _high_risk_inventory_ranking(active_batches: list, today: date) -> list:
+        high_risk_batches = [
+            batch
+            for batch in active_batches
+            if _is_expired_batch(batch, today)
+            or (_batch_days_until_expiry(batch, today) is not None and _batch_days_until_expiry(batch, today) <= 30)
+            or _batch_expiry_status(batch, today) in ALERT_EXPIRY_STATUSES
+        ]
+        return sorted(high_risk_batches, key=lambda batch: _expiry_sort_key(batch, today))[:10]
 
 
 class BatchService:
