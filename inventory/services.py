@@ -703,10 +703,10 @@ class QrCredentialService:
         return credential, cls.format_qr_code(batch.batch_code, token)
 
     @classmethod
-    def build_label_payload(cls, batch_id: int) -> dict:
+    def build_label_payload(cls, batch_id: int, *, created_by: str | None = None) -> dict:
         try:
             batch = Batch.objects.select_related("product").get(pk=batch_id)
-            _credential, qr_code = cls.issue_for_batch(batch)
+            _credential, qr_code = cls.issue_for_batch(batch, created_by=created_by)
         except Batch.DoesNotExist as exc:
             raise NotFoundApiError(f"Batch {batch_id} not found") from exc
         except DatabaseError as exc:

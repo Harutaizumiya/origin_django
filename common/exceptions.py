@@ -30,3 +30,9 @@ class ConflictApiError(ApiError):
     status_code = 409
     code = 4091
     message = "conflict"
+
+
+class UnauthenticatedApiError(ApiError):
+    status_code = 401
+    code = 4011
+    message = "unauthenticated"

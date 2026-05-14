@@ -223,7 +223,7 @@ class BatchExpiryAlertsView(ServiceAPIView):
 
 class BatchLabelPayloadView(ServiceAPIView):
     def get(self, request, batch_id: int):
-        payload = QrCredentialService.build_label_payload(batch_id)
+        payload = QrCredentialService.build_label_payload(batch_id, created_by=str(request.user))
         serializer = BatchLabelPayloadSerializer(payload)
         return success_response(serializer.data)
 

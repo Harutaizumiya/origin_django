@@ -56,7 +56,7 @@ class BatchOperation(models.Model):
         managed = False
         db_table = "batch_operations"
         indexes = [
-            models.Index(fields=["batch", "-created_at", "-id"], name="batch_operations_batch_created_idx"),
+            models.Index(fields=["batch", "-created_at", "-id"], name="batch_ops_batch_created_idx"),
             models.Index(fields=["operation_type"], name="batch_operations_type_idx"),
         ]
         constraints = [
@@ -77,7 +77,7 @@ class BatchQrCredential(models.Model):
         managed = False
         db_table = "batch_qr_credentials"
         indexes = [
-            models.Index(fields=["batch", "revoked_at"], name="batch_qr_credentials_batch_revoked_idx"),
+            models.Index(fields=["batch", "revoked_at"], name="batch_qr_batch_rev_idx"),
             models.Index(fields=["batch_code"], name="batch_qr_credentials_code_idx"),
         ]
 
@@ -110,7 +110,7 @@ class QrScanAuditLog(models.Model):
         managed = False
         db_table = "qr_scan_audit_logs"
         indexes = [
-            models.Index(fields=["batch", "-scanned_at_server"], name="qr_scan_audit_logs_batch_scanned_idx"),
-            models.Index(fields=["source", "device_id", "client_scan_id"], name="qr_scan_audit_logs_client_scan_idx"),
+            models.Index(fields=["batch", "-scanned_at_server"], name="qr_audit_batch_scan_idx"),
+            models.Index(fields=["source", "device_id", "client_scan_id"], name="qr_audit_client_scan_idx"),
             models.Index(fields=["result_status"], name="qr_scan_audit_logs_status_idx"),
         ]

@@ -10,9 +10,11 @@
 
 ## 认证说明
 
-- 当前接口暂不要求认证。
-- 未来如启用认证，统一使用请求头：`Authorization: Bearer <token>`。
-- 当前文档先保留该约定，具体 token 签发与校验规则后续单独补充。
+- 当前除首页 `/` 和认证接口外，业务 API 均要求登录。
+- 统一使用请求头：`Authorization: Bearer <token>`。
+- token 为不含业务含义的 opaque 字符串；客户端不得解析 token 内容。
+- 登录 token 固定 8 小时过期，`expires_in = 28800`，暂不提供 refresh token。
+- `POST /auth/logout` 只吊销当前请求携带的 token；多设备登录允许多个未过期 token 并存。
 
 ## 统一响应结构
 
@@ -52,7 +54,7 @@
 
 ### 错误响应
 
-- HTTP 状态码：`400` / `404` / `409`
+- HTTP 状态码：`400` / `401` / `404` / `409`
 - `code`：业务整数码
 - `message`：稳定英文标识
 - `data`：固定为 `null`
@@ -70,6 +72,7 @@
 | HTTP 状态码 | 业务码 | message |
 | --- | ---: | --- |
 | `400` | `4001` | `validation_error` |
+| `401` | `4011` | `unauthenticated` |
 | `404` | `4041` | `not_found` |
 | `409` | `4091` | `conflict` |
 
@@ -84,6 +87,28 @@
   - `used_up`
 
 ## 复用 Schema
+
+### AuthUser
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | integer | 用户 ID |
+| `username` | string | 登录用户名 |
+| `email` | string | 邮箱，可为空字符串 |
+| `first_name` | string | 名，可为空字符串 |
+| `last_name` | string | 姓，可为空字符串 |
+| `is_staff` | boolean | 是否 staff 用户 |
+| `is_superuser` | boolean | 是否超级用户 |
+
+### AuthLoginResult
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `token` | string | Bearer token 明文，只在登录响应返回 |
+| `token_type` | string | 固定为 `Bearer` |
+| `expires_in` | integer | 固定为 `28800` 秒 |
+| `expires_at` | string | token 到期时间，ISO 8601 时间点 |
+| `user` | AuthUser | 当前登录用户 |
 
 ### Product
 
@@ -266,6 +291,64 @@
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | integer | 被删除资源的 ID |
+
+## 认证接口
+
+### POST `/auth/login`
+
+使用 Django 用户名和密码登录，签发 8 小时 Bearer token。
+
+请求体：
+
+```json
+{
+  "username": "operator",
+  "password": "password"
+}
+```
+
+成功响应：
+- `data`：`AuthLoginResult`
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `401 / 4011 / unauthenticated`
+- `409 / 4091 / conflict`
+
+### POST `/auth/logout`
+
+吊销当前请求携带的 Bearer token。
+
+认证：
+- 必须携带 `Authorization: Bearer <token>`
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "revoked": true
+  }
+}
+```
+
+常见错误：
+- `401 / 4011 / unauthenticated`
+
+### GET `/auth/me`
+
+查询当前登录用户。
+
+认证：
+- 必须携带 `Authorization: Bearer <token>`
+
+成功响应：
+- `data`：`AuthUser`
+
+常见错误：
+- `401 / 4011 / unauthenticated`
 
 ## 看板接口
 
@@ -692,8 +775,7 @@
 - `batch_id`：批次 ID
 
 说明：
-- 当前项目尚未接入真实认证，因此本接口暂不做登录校验。
-- 后续启用认证后，本接口必须要求登录和批次标签打印权限。
+- 本接口必须登录；当前阶段只要求登录，不做细粒度标签打印权限。
 - 二维码内容只包含凭证：`OB1|{batchCode}|{token}`，不包含效期判断结果。
 - token 明文只在本次响应中返回；数据库只保存 `sha256(token + QR_TOKEN_PEPPER)`。
 - 读取标签载荷会签发一条新凭证；已有未吊销二维码继续有效。
@@ -720,6 +802,7 @@
 - `data`：`BatchLabelPayload`
 
 常见错误：
+- `401 / 4011 / unauthenticated`
 - `404 / 4041 / not_found`
 - `409 / 4091 / conflict`
 

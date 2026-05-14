@@ -3,6 +3,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.contrib.auth.models import User
 from django.test import SimpleTestCase
 from rest_framework.test import APIClient
 
@@ -12,6 +13,8 @@ from common.exceptions import ConflictApiError, NotFoundApiError
 class InventoryApiTests(SimpleTestCase):
     def setUp(self):
         self.client = APIClient()
+        self.user = User(username="api-test")
+        self.client.force_authenticate(user=self.user)
 
     def test_homepage_renders(self):
         response = self.client.get("/")
@@ -513,7 +516,17 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["qrCode"], "OB1|BATCH-001|token")
-        mock_build_label_payload.assert_called_once_with(3)
+        mock_build_label_payload.assert_called_once_with(3, created_by="api-test")
+
+    @patch("inventory.views.QrCredentialService.build_label_payload")
+    def test_batch_label_payload_requires_authentication(self, mock_build_label_payload):
+        client = APIClient()
+
+        response = client.get("/api/batches/3/label-payload")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"code": 4011, "message": "unauthenticated", "data": None})
+        mock_build_label_payload.assert_not_called()
 
     @patch("inventory.views.QrScanService.scan_qr")
     def test_qr_scan_returns_standard_scan_result(self, mock_scan_qr):
