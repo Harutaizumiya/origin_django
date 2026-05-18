@@ -1,7 +1,21 @@
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 
-from accounts.schemas import AuthLoginResultSerializer, AuthUserSerializer, LoginSerializer, LogoutResultSerializer
-from accounts.services import AuthTokenService
+from accounts.permissions import SuperAdminPermission
+from accounts.schemas import (
+    AuthAdminUserSerializer,
+    AuthLoginResultSerializer,
+    AuthUserSerializer,
+    LoginSerializer,
+    LogoutResultSerializer,
+    PermissionGroupSerializer,
+    RoleInputSerializer,
+    RoleOutputSerializer,
+    RoleUpdateSerializer,
+    UserCreateSerializer,
+    UserPasswordResetSerializer,
+    UserUpdateSerializer,
+)
+from accounts.services import AuthTokenService, PermissionService, RoleService, UserAdminService
 from common.responses import success_response
 from common.views import ServiceAPIView
 
@@ -33,3 +47,80 @@ class MeView(ServiceAPIView):
     def get(self, request):
         output = AuthUserSerializer(AuthTokenService.serialize_user(request.user))
         return success_response(output.data)
+
+
+class PermissionCollectionView(ServiceAPIView):
+    permission_classes = [IsAuthenticated, SuperAdminPermission]
+
+    def get(self, request):
+        PermissionService.sync_permissions()
+        output = PermissionGroupSerializer(PermissionService.grouped_catalog(), many=True)
+        return success_response({"items": output.data, "pagination": None})
+
+
+class RoleCollectionView(ServiceAPIView):
+    permission_classes = [IsAuthenticated, SuperAdminPermission]
+
+    def get(self, request):
+        output = RoleOutputSerializer(RoleService.list_roles(), many=True)
+        return success_response({"items": output.data, "pagination": None})
+
+    def post(self, request):
+        serializer = RoleInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        role = RoleService.create_role(serializer.validated_data)
+        return success_response(RoleOutputSerializer(role).data, status_code=201)
+
+
+class RoleDetailView(ServiceAPIView):
+    permission_classes = [IsAuthenticated, SuperAdminPermission]
+
+    def get(self, request, role_id: int):
+        role = RoleService.serialize_role(RoleService.get_role(role_id))
+        return success_response(RoleOutputSerializer(role).data)
+
+    def patch(self, request, role_id: int):
+        serializer = RoleUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        role = RoleService.update_role(role_id, serializer.validated_data)
+        return success_response(RoleOutputSerializer(role).data)
+
+    def delete(self, request, role_id: int):
+        return success_response(RoleService.delete_role(role_id))
+
+
+class UserCollectionView(ServiceAPIView):
+    permission_classes = [IsAuthenticated, SuperAdminPermission]
+
+    def get(self, request):
+        output = AuthAdminUserSerializer(UserAdminService.list_users(), many=True)
+        return success_response({"items": output.data, "pagination": None})
+
+    def post(self, request):
+        serializer = UserCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = UserAdminService.create_user(serializer.validated_data)
+        return success_response(AuthAdminUserSerializer(user).data, status_code=201)
+
+
+class UserDetailView(ServiceAPIView):
+    permission_classes = [IsAuthenticated, SuperAdminPermission]
+
+    def get(self, request, user_id: int):
+        user = UserAdminService.serialize_user(UserAdminService.get_user(user_id))
+        return success_response(AuthAdminUserSerializer(user).data)
+
+    def patch(self, request, user_id: int):
+        serializer = UserUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = UserAdminService.update_user(user_id, serializer.validated_data)
+        return success_response(AuthAdminUserSerializer(user).data)
+
+
+class UserPasswordView(ServiceAPIView):
+    permission_classes = [IsAuthenticated, SuperAdminPermission]
+
+    def post(self, request, user_id: int):
+        serializer = UserPasswordResetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return success_response(UserAdminService.reset_password(user_id, serializer.validated_data["password"]))

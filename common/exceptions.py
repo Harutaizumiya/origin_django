@@ -36,3 +36,9 @@ class UnauthenticatedApiError(ApiError):
     status_code = 401
     code = 4011
     message = "unauthenticated"
+
+
+class ForbiddenApiError(ApiError):
+    status_code = 403
+    code = 4031
+    message = "forbidden"

@@ -77,6 +77,8 @@ def scan_request_context(request) -> dict:
 
 
 class DashboardOverviewView(ServiceAPIView):
+    permission_map = {"GET": "dashboard_read"}
+
     def get(self, request):
         overview = DashboardService.get_overview()
         serializer = DashboardOverviewSerializer(overview)
@@ -84,6 +86,8 @@ class DashboardOverviewView(ServiceAPIView):
 
 
 class AnalyticsSummaryView(ServiceAPIView):
+    permission_map = {"GET": "analytics_read"}
+
     def get(self, request):
         query = AnalyticsSummaryQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -93,6 +97,8 @@ class AnalyticsSummaryView(ServiceAPIView):
 
 
 class ProductCollectionView(ServiceAPIView):
+    permission_map = {"GET": "products_read", "POST": "products_create"}
+
     def get(self, request):
         query = ProductListQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -119,6 +125,8 @@ class ProductCollectionView(ServiceAPIView):
 
 
 class ProductDetailView(ServiceAPIView):
+    permission_map = {"GET": "products_read", "PATCH": "products_update", "DELETE": "products_delete"}
+
     def get(self, request, product_id: int):
         product = ProductService.get_product(product_id)
         return success_response(ProductOutputSerializer(product).data)
@@ -135,12 +143,16 @@ class ProductDetailView(ServiceAPIView):
 
 
 class ProductBarcodeDetailView(ServiceAPIView):
+    permission_map = {"GET": "products_read"}
+
     def get(self, request, barcode: str):
         product = ProductService.get_product_by_barcode(barcode)
         return success_response(ProductOutputSerializer(product).data)
 
 
 class ProductCategoriesView(ServiceAPIView):
+    permission_map = {"GET": "products_read"}
+
     def get(self, request):
         query = CategoryQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -149,6 +161,8 @@ class ProductCategoriesView(ServiceAPIView):
 
 
 class ProductBatchCollectionView(ServiceAPIView):
+    permission_map = {"GET": "batches_read"}
+
     def get(self, request, product_id: int):
         query = ProductBatchListQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -171,6 +185,8 @@ class ProductBatchCollectionView(ServiceAPIView):
 
 
 class BatchCollectionView(ServiceAPIView):
+    permission_map = {"GET": "batches_read", "POST": "batches_create"}
+
     def get(self, request):
         query = BatchListQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -199,6 +215,8 @@ class BatchCollectionView(ServiceAPIView):
 
 
 class BatchExpiryAlertsView(ServiceAPIView):
+    permission_map = {"GET": "batches_read"}
+
     def get(self, request):
         query = ExpiryAlertQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -225,6 +243,8 @@ class BatchExpiryAlertsView(ServiceAPIView):
 
 
 class BatchLabelPayloadView(ServiceAPIView):
+    permission_map = {"GET": "label_payload_issue"}
+
     def get(self, request, batch_id: int):
         payload = QrCredentialService.build_label_payload(batch_id, created_by=str(request.user))
         serializer = BatchLabelPayloadSerializer(payload)
@@ -232,6 +252,8 @@ class BatchLabelPayloadView(ServiceAPIView):
 
 
 class QrScanCollectionView(ServiceAPIView):
+    permission_map = {"POST": "qr_scans_create"}
+
     def post(self, request):
         serializer = QrScanRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -244,6 +266,8 @@ class QrScanCollectionView(ServiceAPIView):
 
 
 class QrScanBulkView(ServiceAPIView):
+    permission_map = {"POST": "qr_scans_create"}
+
     def post(self, request):
         serializer = QrScanBulkRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -256,6 +280,17 @@ class QrScanBulkView(ServiceAPIView):
 
 
 class BatchOperationCollectionView(ServiceAPIView):
+    permission_map = {"GET": "batch_operations_read"}
+
+    def get_required_permission(self, request):
+        if request.method != "POST":
+            return self.permission_map.get(request.method)
+        return {
+            "add": "batch_operations_add",
+            "deduct": "batch_operations_deduct",
+            "loss": "batch_operations_loss",
+        }.get(request.data.get("operation_type"))
+
     def get(self, request, batch_id: int):
         query = BatchOperationListQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -289,6 +324,8 @@ class BatchOperationCollectionView(ServiceAPIView):
 
 
 class BatchOperationRevertView(ServiceAPIView):
+    permission_map = {"POST": "batch_operations_revert"}
+
     def post(self, request, batch_id: int, operation_id: int):
         serializer = BatchOperationRevertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -308,6 +345,8 @@ class BatchOperationRevertView(ServiceAPIView):
 
 
 class BatchDetailView(ServiceAPIView):
+    permission_map = {"GET": "batches_read", "PATCH": "batches_update", "DELETE": "batches_delete"}
+
     def get(self, request, batch_id: int):
         batch = BatchService.get_batch(batch_id)
         return success_response(BatchOutputSerializer(batch).data)
@@ -324,6 +363,8 @@ class BatchDetailView(ServiceAPIView):
 
 
 class BatchStatusView(ServiceAPIView):
+    permission_map = {"PATCH": "batches_update"}
+
     def patch(self, request, batch_id: int):
         serializer = BatchStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

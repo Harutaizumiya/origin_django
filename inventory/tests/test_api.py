@@ -4,16 +4,17 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
+from accounts.services import PermissionService
 from common.exceptions import ConflictApiError, NotFoundApiError
 
 
 class InventoryApiTests(SimpleTestCase):
     def setUp(self):
         self.client = APIClient()
-        self.user = User(id=123, username="api-test")
+        self.user = User(id=123, username="api-test", is_superuser=True)
         self.client.force_authenticate(user=self.user)
 
     def test_homepage_renders(self):
@@ -865,3 +866,123 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
+
+
+class InventoryPermissionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        PermissionService.sync_permissions()
+        self.user = User.objects.create_user(username="permission-user", password="password")
+        self.client.force_authenticate(user=self.user)
+
+    def _grant(self, *codes):
+        self.user.user_permissions.add(*PermissionService.permission_queryset_for_codes(list(codes)))
+        for cache_name in ("_perm_cache", "_user_perm_cache", "_group_perm_cache"):
+            if hasattr(self.user, cache_name):
+                delattr(self.user, cache_name)
+
+    @patch("inventory.views.ProductService.list_products")
+    def test_business_api_without_component_permission_returns_forbidden(self, mock_list_products):
+        response = self.client.get("/api/products")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(), {"code": 4031, "message": "forbidden", "data": None})
+        mock_list_products.assert_not_called()
+
+    @patch("inventory.views.ProductService.list_products")
+    def test_products_read_permission_allows_product_list(self, mock_list_products):
+        self._grant("products_read")
+        mock_list_products.return_value = ([], 0)
+
+        response = self.client.get("/api/products")
+
+        self.assertEqual(response.status_code, 200)
+        mock_list_products.assert_called_once()
+
+    @patch("inventory.views.BatchOperationService.create_operation")
+    def test_batch_operation_permission_is_checked_by_operation_type(self, mock_create_operation):
+        self._grant("batch_operations_add")
+
+        denied_response = self.client.post(
+            "/api/batches/3/operations",
+            {"operation_type": "loss", "quantity": "2.00"},
+            format="json",
+        )
+
+        self.assertEqual(denied_response.status_code, 403)
+        self.assertEqual(denied_response.json(), {"code": 4031, "message": "forbidden", "data": None})
+        mock_create_operation.assert_not_called()
+
+        self._grant("batch_operations_loss")
+        mock_create_operation.return_value = (
+            SimpleNamespace(
+                id=7,
+                batch_id=3,
+                operation_type="loss",
+                quantity=Decimal("2.00"),
+                quantity_after=Decimal("6.50"),
+                remarks=None,
+                created_at=None,
+                reversed_operation_id=None,
+                is_reverted=False,
+            ),
+            SimpleNamespace(id=3, quantity=Decimal("6.50"), status=None),
+        )
+
+        allowed_response = self.client.post(
+            "/api/batches/3/operations",
+            {"operation_type": "loss", "quantity": "2.00"},
+            format="json",
+        )
+
+        self.assertEqual(allowed_response.status_code, 201)
+        mock_create_operation.assert_called_once()
+
+    @patch("inventory.views.QrCredentialService.build_label_payload")
+    def test_label_payload_requires_issue_permission(self, mock_build_label_payload):
+        denied_response = self.client.get("/api/batches/3/label-payload")
+
+        self.assertEqual(denied_response.status_code, 403)
+        mock_build_label_payload.assert_not_called()
+
+        self._grant("label_payload_issue")
+        mock_build_label_payload.return_value = {
+            "batchCode": "BATCH-001",
+            "productName": "Milk",
+            "barcode": "123456",
+            "quantity": "8.50",
+            "location": "A-01",
+            "expireDate": "2026-05-06",
+            "qrCode": "OB1|BATCH-001|token",
+        }
+
+        allowed_response = self.client.get("/api/batches/3/label-payload")
+
+        self.assertEqual(allowed_response.status_code, 200)
+        mock_build_label_payload.assert_called_once()
+
+    @patch("inventory.views.QrScanService.scan_qr")
+    def test_qr_scan_requires_scan_permission(self, mock_scan_qr):
+        payload = {"qr": "OB1|BATCH-001|token", "source": "mobile_camera"}
+
+        denied_response = self.client.post("/api/qr-scans", payload, format="json")
+
+        self.assertEqual(denied_response.status_code, 403)
+        mock_scan_qr.assert_not_called()
+
+        self._grant("qr_scans_create")
+        mock_scan_qr.return_value = {
+            "auditId": "scan_abc",
+            "batchCode": "BATCH-001",
+            "productName": "Milk",
+            "status": "valid",
+            "message": "该批次仍在效期内",
+            "expireDate": "2026-05-06",
+            "remainingDays": 9,
+            "clientScanId": None,
+        }
+
+        allowed_response = self.client.post("/api/qr-scans", payload, format="json")
+
+        self.assertEqual(allowed_response.status_code, 200)
+        mock_scan_qr.assert_called_once()

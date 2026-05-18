@@ -16,6 +16,8 @@
 - 登录 token 固定 8 小时过期，`expires_in = 28800`，暂不提供 refresh token。
 - `POST /auth/logout` 只吊销当前请求携带的 token；多设备登录允许多个未过期 token 并存。
 - 商品、批次、库存操作和扫码审计会记录当前登录用户；当前响应体暂不返回操作者字段。
+- 业务 API 使用组件级权限控制；`is_superuser=true` 自动拥有全部权限。
+- 超级管理员可通过 `/auth/permissions`、`/auth/roles`、`/auth/users` 配置角色、权限和用户授权。
 
 ## 统一响应结构
 
@@ -55,7 +57,7 @@
 
 ### 错误响应
 
-- HTTP 状态码：`400` / `401` / `404` / `409`
+- HTTP 状态码：`400` / `401` / `403` / `404` / `409`
 - `code`：业务整数码
 - `message`：稳定英文标识
 - `data`：固定为 `null`
@@ -74,6 +76,7 @@
 | --- | ---: | --- |
 | `400` | `4001` | `validation_error` |
 | `401` | `4011` | `unauthenticated` |
+| `403` | `4031` | `forbidden` |
 | `404` | `4041` | `not_found` |
 | `409` | `4091` | `conflict` |
 
@@ -100,6 +103,31 @@
 | `last_name` | string | 姓，可为空字符串 |
 | `is_staff` | boolean | 是否 staff 用户 |
 | `is_superuser` | boolean | 是否超级用户 |
+| `permissions` | string[] | 当前用户有效业务权限码；超级管理员返回全部权限码 |
+
+### AuthAdminUser
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | integer | 用户 ID |
+| `username` | string | 登录用户名 |
+| `email` | string | 邮箱，可为空字符串 |
+| `first_name` | string | 名，可为空字符串 |
+| `last_name` | string | 姓，可为空字符串 |
+| `is_active` | boolean | 是否启用 |
+| `is_staff` | boolean | 是否 staff 用户 |
+| `is_superuser` | boolean | 是否超级用户；不能通过用户管理 API 设置 |
+| `groups` | AuthRole[] | 已分配角色 |
+| `direct_permissions` | string[] | 直接分配给用户的权限码 |
+| `effective_permissions` | string[] | 角色权限和直接权限合并后的有效权限码 |
+
+### AuthRole
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | integer | Django Group ID |
+| `name` | string | 角色名称 |
+| `permissions` | string[] | 角色拥有的权限码 |
 
 ### AuthLoginResult
 
@@ -293,6 +321,40 @@
 | --- | --- | --- |
 | `id` | integer | 被删除资源的 ID |
 
+## 组件权限码
+
+| 权限码 | 组件 | 动作 | 说明 |
+| --- | --- | --- | --- |
+| `products_read` | products | read | 商品列表、详情、条码查询、分类查询 |
+| `products_create` | products | create | 创建商品 |
+| `products_update` | products | update | 更新商品 |
+| `products_delete` | products | delete | 删除商品 |
+| `batches_read` | batches | read | 批次列表、商品批次、批次详情、效期预警 |
+| `batches_create` | batches | create | 创建批次 |
+| `batches_update` | batches | update | 更新批次、更新批次状态 |
+| `batches_delete` | batches | delete | 删除批次 |
+| `batch_operations_read` | batch_operations | read | 查看批次库存操作记录 |
+| `batch_operations_add` | batch_operations | add | 创建 `operation_type=add` 入库操作 |
+| `batch_operations_deduct` | batch_operations | deduct | 创建 `operation_type=deduct` 出库操作 |
+| `batch_operations_loss` | batch_operations | loss | 创建 `operation_type=loss` 报损操作 |
+| `batch_operations_revert` | batch_operations | revert | 撤销库存操作 |
+| `label_payload_issue` | label_payload | issue | 签发可打印二维码凭证 |
+| `qr_scans_create` | qr_scans | create | 单条扫码和批量扫码 |
+| `dashboard_read` | dashboard | read | 库存看板概览 |
+| `analytics_read` | analytics | read | 分析汇总 |
+
+### 接口权限映射
+
+- `GET /dashboard/overview`：`dashboard_read`
+- `GET /analytics/summary`：`analytics_read`
+- 商品读接口：`products_read`；`POST /products`：`products_create`；`PATCH /products/{id}`：`products_update`；`DELETE /products/{id}`：`products_delete`
+- 批次读接口：`batches_read`；`POST /batches`：`batches_create`；`PATCH /batches/{id}` 和 `PATCH /batches/{id}/status`：`batches_update`；`DELETE /batches/{id}`：`batches_delete`
+- `GET /batches/{id}/operations`：`batch_operations_read`
+- `POST /batches/{id}/operations`：按 `operation_type` 分别要求 `batch_operations_add`、`batch_operations_deduct`、`batch_operations_loss`
+- `POST /batches/{id}/operations/{operation_id}/revert`：`batch_operations_revert`
+- `GET /batches/{id}/label-payload`：`label_payload_issue`
+- `POST /qr-scans` 和 `POST /qr-scans/bulk`：`qr_scans_create`
+
 ## 认证接口
 
 ### POST `/auth/login`
@@ -350,6 +412,175 @@
 
 常见错误：
 - `401 / 4011 / unauthenticated`
+
+## 权限管理接口
+
+以下接口仅允许 `is_superuser=true` 的用户访问。非超级管理员返回
+`403 / 4031 / forbidden`。
+
+### GET `/auth/permissions`
+
+返回全部业务权限目录，按组件分组。
+
+成功响应：
+- `data.items[]`：`{ component, permissions[] }`
+- `data.items[].permissions[]`：包含 `code,name,component,action,description`
+- `data.pagination`：`null`
+
+### GET `/auth/roles`
+
+返回角色列表。角色底层使用 Django `Group`。
+
+成功响应：
+- `data.items[]`：`AuthRole`
+- `data.pagination`：`null`
+
+### POST `/auth/roles`
+
+创建角色并配置权限。
+
+请求体：
+
+```json
+{
+  "name": "warehouse_operator",
+  "permission_codes": ["products_read", "batch_operations_add"]
+}
+```
+
+成功响应：
+- `201`
+- `data`：`AuthRole`
+
+常见错误：
+- `400 / 4001 / validation_error`
+- `403 / 4031 / forbidden`
+- `409 / 4091 / conflict`
+
+### GET `/auth/roles/{id}`
+
+查询角色详情。
+
+成功响应：
+- `data`：`AuthRole`
+
+### PATCH `/auth/roles/{id}`
+
+更新角色名称和权限。`permission_codes` 存在时会整体替换角色权限。
+
+请求体：
+
+```json
+{
+  "name": "warehouse_manager",
+  "permission_codes": ["products_read", "products_create"]
+}
+```
+
+成功响应：
+- `data`：`AuthRole`
+
+### DELETE `/auth/roles/{id}`
+
+删除角色。角色已分配给用户时返回 `409 / 4091 / conflict`。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "id": 1
+  }
+}
+```
+
+### GET `/auth/users`
+
+返回用户列表。
+
+成功响应：
+- `data.items[]`：`AuthAdminUser`
+- `data.pagination`：`null`
+
+### POST `/auth/users`
+
+创建普通用户或 staff 用户；不支持通过该接口创建超级管理员。
+
+请求体：
+
+```json
+{
+  "username": "operator",
+  "password": "password",
+  "email": "operator@example.com",
+  "first_name": "Origin",
+  "last_name": "User",
+  "is_active": true,
+  "is_staff": false,
+  "group_ids": [1],
+  "permission_codes": ["qr_scans_create"]
+}
+```
+
+成功响应：
+- `201`
+- `data`：`AuthAdminUser`
+
+### GET `/auth/users/{id}`
+
+查询用户详情。
+
+成功响应：
+- `data`：`AuthAdminUser`
+
+### PATCH `/auth/users/{id}`
+
+更新用户资料、启用状态、staff 状态、角色和直接权限。`group_ids` 和
+`permission_codes` 存在时会整体替换对应授权。
+
+请求体：
+
+```json
+{
+  "email": "operator@example.com",
+  "first_name": "Origin",
+  "last_name": "User",
+  "is_active": true,
+  "is_staff": false,
+  "group_ids": [1],
+  "permission_codes": ["products_read"]
+}
+```
+
+成功响应：
+- `data`：`AuthAdminUser`
+
+### POST `/auth/users/{id}/password`
+
+重置用户密码。
+
+请求体：
+
+```json
+{
+  "password": "new-password"
+}
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "id": 2,
+    "password_reset": true
+  }
+}
+```
 
 ## 看板接口
 

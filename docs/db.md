@@ -2,8 +2,8 @@
 
 本文档按当前 Django model 映射整理数据库结构。库存业务模型均设置为
 `managed = False`，说明 Django 当前不会通过 migration 创建或变更这些业务表；
-实际数据库结构需要与本文档保持一致。Django auth、session 以及 `accounts_auth_tokens`
-由 Django migrations 管理。
+实际数据库结构需要与本文档保持一致。Django auth、session、权限相关表以及
+`accounts_auth_tokens` 由 Django migrations 管理。
 
 ## 基础信息
 
@@ -13,6 +13,8 @@
 - 测试环境：执行测试时使用 SQLite 文件 `test.sqlite3`
 - 时区：`Asia/Shanghai`
 - 认证 token pepper：通过 `AUTH_TOKEN_PEPPER` 配置读取，未配置时回退到 `SECRET_KEY`
+- 组件级权限复用 Django `auth_group`、`auth_permission`、`auth_user_groups`、
+  `auth_user_user_permissions`，不新增自定义角色关系表
 
 ## 表关系
 
@@ -26,6 +28,12 @@ erDiagram
     auth_user ||--o{ batch_operations : "operates"
     auth_user ||--o{ qr_scan_audit_logs : "scans"
     auth_user ||--o{ inventory_audit_logs : "acts"
+    auth_user ||--o{ auth_user_groups : "joins"
+    auth_group ||--o{ auth_user_groups : "assigns"
+    auth_group ||--o{ auth_group_permissions : "grants"
+    auth_permission ||--o{ auth_group_permissions : "belongs"
+    auth_permission ||--o{ auth_user_user_permissions : "direct"
+    auth_user ||--o{ auth_user_user_permissions : "has"
 
     product {
         bigint id PK
@@ -118,6 +126,37 @@ erDiagram
 Django 内置的 `auth_*`、`django_session` 表由 `django.contrib.auth` 和
 `django.contrib.sessions` 的 migrations 创建和维护。当前项目不自定义用户表，登录用户来自
 Django 默认用户模型。
+
+### 组件级权限约定
+
+- 角色使用 Django `auth_group`。
+- 权限使用 Django `auth_permission`，业务权限码存储在 `codename`。
+- 当前权限 ContentType 约定为 `app_label = accounts`、`model = componentpermission`。
+- 业务权限码由 `accounts` app 在 `post_migrate` 后同步创建或更新。
+- 用户有效权限 = 用户所属角色权限 + 用户直接权限；`is_superuser = true` 始终拥有全部业务权限。
+- 用户管理 API 不负责创建超级管理员；超级管理员仍通过 Django Admin、`createsuperuser` 或数据库管理流程创建。
+
+当前业务权限码：
+
+| codename | 说明 |
+| --- | --- |
+| `products_read` | 查看商品 |
+| `products_create` | 创建商品 |
+| `products_update` | 更新商品 |
+| `products_delete` | 删除商品 |
+| `batches_read` | 查看批次 |
+| `batches_create` | 创建批次 |
+| `batches_update` | 更新批次和状态 |
+| `batches_delete` | 删除批次 |
+| `batch_operations_read` | 查看库存操作 |
+| `batch_operations_add` | 入库操作 |
+| `batch_operations_deduct` | 出库操作 |
+| `batch_operations_loss` | 报损操作 |
+| `batch_operations_revert` | 撤销库存操作 |
+| `label_payload_issue` | 签发二维码凭证 |
+| `qr_scans_create` | 扫码审计 |
+| `dashboard_read` | 查看库存看板 |
+| `analytics_read` | 查看分析汇总 |
 
 ## 表：accounts_auth_tokens
 

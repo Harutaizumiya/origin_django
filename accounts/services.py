@@ -4,11 +4,22 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group, Permission
+from django.contrib.contenttypes.models import ContentType
 from django.db import DatabaseError
+from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import AuthToken
-from common.exceptions import ConflictApiError, UnauthenticatedApiError
+from accounts.permissions import (
+    COMPONENT_PERMISSION_CODES,
+    COMPONENT_PERMISSIONS,
+    PERMISSION_APP_LABEL,
+    PERMISSION_CONTENT_TYPE_MODEL,
+    catalog_as_dicts,
+)
+from common.exceptions import ConflictApiError, NotFoundApiError, UnauthenticatedApiError, ValidationApiError
 
 
 class AuthTokenService:
@@ -34,6 +45,7 @@ class AuthTokenService:
             "last_name": user.last_name,
             "is_staff": user.is_staff,
             "is_superuser": user.is_superuser,
+            "permissions": PermissionService.effective_permission_codes(user),
         }
 
     @classmethod
@@ -86,3 +98,232 @@ class AuthTokenService:
             except DatabaseError as exc:
                 raise ConflictApiError("Unable to revoke auth token") from exc
         return {"revoked": True}
+
+
+class PermissionService:
+    @staticmethod
+    def catalog() -> list[dict]:
+        return catalog_as_dicts()
+
+    @classmethod
+    def sync_permissions(cls) -> None:
+        content_type, _ = ContentType.objects.get_or_create(
+            app_label=PERMISSION_APP_LABEL,
+            model=PERMISSION_CONTENT_TYPE_MODEL,
+        )
+        for item in COMPONENT_PERMISSIONS:
+            Permission.objects.update_or_create(
+                content_type=content_type,
+                codename=item.code,
+                defaults={"name": item.name},
+            )
+
+    @staticmethod
+    def grouped_catalog() -> list[dict]:
+        groups: dict[str, dict] = {}
+        for item in catalog_as_dicts():
+            groups.setdefault(item["component"], {"component": item["component"], "permissions": []})
+            groups[item["component"]]["permissions"].append(item)
+        return list(groups.values())
+
+    @classmethod
+    def permission_queryset_for_codes(cls, codes: list[str]):
+        cls.validate_permission_codes(codes)
+        cls.sync_permissions()
+        return Permission.objects.filter(
+            content_type__app_label=PERMISSION_APP_LABEL,
+            codename__in=codes,
+        )
+
+    @staticmethod
+    def validate_permission_codes(codes: list[str]) -> None:
+        unknown = sorted(set(codes) - COMPONENT_PERMISSION_CODES)
+        if unknown:
+            raise ValidationApiError(f"Unknown permission codes: {', '.join(unknown)}")
+
+    @staticmethod
+    def effective_permission_codes(user) -> list[str]:
+        if getattr(user, "is_superuser", False):
+            return sorted(COMPONENT_PERMISSION_CODES)
+        if not getattr(user, "is_active", True):
+            return []
+        permission_strings = user.get_all_permissions()
+        return sorted(
+            permission.rsplit(".", 1)[-1]
+            for permission in permission_strings
+            if permission.rsplit(".", 1)[-1] in COMPONENT_PERMISSION_CODES
+        )
+
+    @classmethod
+    def user_has_permission(cls, user, code: str) -> bool:
+        if code not in COMPONENT_PERMISSION_CODES:
+            return False
+        return code in cls.effective_permission_codes(user)
+
+
+class RoleService:
+    @classmethod
+    def serialize_role(cls, group: Group) -> dict:
+        permissions = sorted(
+            permission.codename
+            for permission in group.permissions.filter(content_type__app_label=PERMISSION_APP_LABEL)
+            if permission.codename in COMPONENT_PERMISSION_CODES
+        )
+        return {
+            "id": group.id,
+            "name": group.name,
+            "permissions": permissions,
+        }
+
+    @classmethod
+    def list_roles(cls) -> list[dict]:
+        PermissionService.sync_permissions()
+        return [cls.serialize_role(group) for group in Group.objects.order_by("id").prefetch_related("permissions")]
+
+    @classmethod
+    def get_role(cls, role_id: int) -> Group:
+        try:
+            return Group.objects.prefetch_related("permissions").get(pk=role_id)
+        except Group.DoesNotExist as exc:
+            raise NotFoundApiError(f"Role {role_id} not found") from exc
+
+    @classmethod
+    @transaction.atomic
+    def create_role(cls, data: dict) -> dict:
+        name = data["name"]
+        if Group.objects.filter(name=name).exists():
+            raise ConflictApiError("Role name already exists")
+        group = Group.objects.create(name=name)
+        permission_codes = data.get("permission_codes", [])
+        group.permissions.set(PermissionService.permission_queryset_for_codes(permission_codes))
+        return cls.serialize_role(group)
+
+    @classmethod
+    @transaction.atomic
+    def update_role(cls, role_id: int, data: dict) -> dict:
+        group = cls.get_role(role_id)
+        if "name" in data and data["name"] != group.name:
+            if Group.objects.filter(name=data["name"]).exclude(pk=group.pk).exists():
+                raise ConflictApiError("Role name already exists")
+            group.name = data["name"]
+            group.save(update_fields=["name"])
+        if "permission_codes" in data:
+            group.permissions.set(PermissionService.permission_queryset_for_codes(data["permission_codes"]))
+        return cls.serialize_role(group)
+
+    @classmethod
+    @transaction.atomic
+    def delete_role(cls, role_id: int) -> dict:
+        group = cls.get_role(role_id)
+        if group.user_set.exists():
+            raise ConflictApiError("Role is assigned to users")
+        deleted_id = group.id
+        group.delete()
+        return {"id": deleted_id}
+
+
+class UserAdminService:
+    @staticmethod
+    def _user_model():
+        return get_user_model()
+
+    @classmethod
+    def _groups_for_ids(cls, group_ids: list[int]):
+        groups = list(Group.objects.filter(id__in=group_ids))
+        found_ids = {group.id for group in groups}
+        missing_ids = sorted(set(group_ids) - found_ids)
+        if missing_ids:
+            raise ValidationApiError(f"Unknown group ids: {', '.join(str(group_id) for group_id in missing_ids)}")
+        return groups
+
+    @classmethod
+    def serialize_user(cls, user) -> dict:
+        groups = [
+            RoleService.serialize_role(group)
+            for group in user.groups.order_by("id").prefetch_related("permissions")
+        ]
+        direct_permissions = sorted(
+            permission.codename
+            for permission in user.user_permissions.filter(content_type__app_label=PERMISSION_APP_LABEL)
+            if permission.codename in COMPONENT_PERMISSION_CODES
+        )
+        return {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "is_active": user.is_active,
+            "is_staff": user.is_staff,
+            "is_superuser": user.is_superuser,
+            "groups": groups,
+            "direct_permissions": direct_permissions,
+            "effective_permissions": PermissionService.effective_permission_codes(user),
+        }
+
+    @classmethod
+    def list_users(cls) -> list[dict]:
+        users = (
+            cls._user_model()
+            .objects.order_by("id")
+            .prefetch_related("groups__permissions", "user_permissions")
+        )
+        return [cls.serialize_user(user) for user in users]
+
+    @classmethod
+    def get_user(cls, user_id: int):
+        try:
+            return (
+                cls._user_model()
+                .objects.prefetch_related("groups__permissions", "user_permissions")
+                .get(pk=user_id)
+            )
+        except cls._user_model().DoesNotExist as exc:
+            raise NotFoundApiError(f"User {user_id} not found") from exc
+
+    @classmethod
+    @transaction.atomic
+    def create_user(cls, data: dict) -> dict:
+        model = cls._user_model()
+        if model.objects.filter(username=data["username"]).exists():
+            raise ConflictApiError("Username already exists")
+
+        user = model.objects.create_user(
+            username=data["username"],
+            password=data["password"],
+            email=data.get("email", ""),
+            first_name=data.get("first_name", ""),
+            last_name=data.get("last_name", ""),
+            is_active=data.get("is_active", True),
+            is_staff=data.get("is_staff", False),
+        )
+        if "group_ids" in data:
+            user.groups.set(cls._groups_for_ids(data["group_ids"]))
+        if "permission_codes" in data:
+            user.user_permissions.set(PermissionService.permission_queryset_for_codes(data["permission_codes"]))
+        return cls.serialize_user(user)
+
+    @classmethod
+    @transaction.atomic
+    def update_user(cls, user_id: int, data: dict) -> dict:
+        user = cls.get_user(user_id)
+        update_fields = []
+        for field in ("email", "first_name", "last_name", "is_active", "is_staff"):
+            if field in data:
+                setattr(user, field, data[field])
+                update_fields.append(field)
+        if update_fields:
+            user.save(update_fields=update_fields)
+        if "group_ids" in data:
+            user.groups.set(cls._groups_for_ids(data["group_ids"]))
+        if "permission_codes" in data:
+            user.user_permissions.set(PermissionService.permission_queryset_for_codes(data["permission_codes"]))
+        return cls.serialize_user(user)
+
+    @classmethod
+    @transaction.atomic
+    def reset_password(cls, user_id: int, password: str) -> dict:
+        user = cls.get_user(user_id)
+        user.set_password(password)
+        user.save(update_fields=["password"])
+        return {"id": user.id, "password_reset": True}
