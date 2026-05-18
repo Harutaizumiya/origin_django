@@ -64,12 +64,15 @@ def scan_request_context(request) -> dict:
     ip_address = forwarded_for.split(",", 1)[0].strip() if forwarded_for else request.META.get("REMOTE_ADDR")
     user = getattr(request, "user", None)
     scanner_user = None
+    scanner_user_id = None
     if user is not None and getattr(user, "is_authenticated", False):
         scanner_user = str(user)
+        scanner_user_id = getattr(user, "id", None)
     return {
         "ip_address": ip_address,
         "user_agent": request.META.get("HTTP_USER_AGENT", ""),
         "scanner_user": scanner_user,
+        "scanner_user_id": scanner_user_id,
     }
 
 
@@ -111,7 +114,7 @@ class ProductCollectionView(ServiceAPIView):
     def post(self, request):
         serializer = ProductCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        product = ProductService.create_product(serializer.validated_data)
+        product = ProductService.create_product(serializer.validated_data, actor=request.user)
         return success_response(ProductOutputSerializer(product).data, status_code=201)
 
 
@@ -123,11 +126,11 @@ class ProductDetailView(ServiceAPIView):
     def patch(self, request, product_id: int):
         serializer = ProductUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        product = ProductService.update_product(product_id, serializer.validated_data)
+        product = ProductService.update_product(product_id, serializer.validated_data, actor=request.user)
         return success_response(ProductOutputSerializer(product).data)
 
     def delete(self, request, product_id: int):
-        result = ProductService.delete_product(product_id)
+        result = ProductService.delete_product(product_id, actor=request.user)
         return success_response(result)
 
 
@@ -191,7 +194,7 @@ class BatchCollectionView(ServiceAPIView):
     def post(self, request):
         serializer = BatchCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        batch = BatchService.create_batch(serializer.validated_data)
+        batch = BatchService.create_batch(serializer.validated_data, actor=request.user)
         return success_response(BatchOutputSerializer(batch).data, status_code=201)
 
 
@@ -275,7 +278,7 @@ class BatchOperationCollectionView(ServiceAPIView):
     def post(self, request, batch_id: int):
         serializer = BatchOperationCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        operation, batch = BatchOperationService.create_operation(batch_id, serializer.validated_data)
+        operation, batch = BatchOperationService.create_operation(batch_id, serializer.validated_data, actor=request.user)
         return success_response(
             {
                 "operation": BatchOperationOutputSerializer(operation).data,
@@ -293,6 +296,7 @@ class BatchOperationRevertView(ServiceAPIView):
             batch_id=batch_id,
             operation_id=operation_id,
             data=serializer.validated_data,
+            actor=request.user,
         )
         return success_response(
             {
@@ -311,11 +315,11 @@ class BatchDetailView(ServiceAPIView):
     def patch(self, request, batch_id: int):
         serializer = BatchUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        batch = BatchService.update_batch(batch_id, serializer.validated_data)
+        batch = BatchService.update_batch(batch_id, serializer.validated_data, actor=request.user)
         return success_response(BatchOutputSerializer(batch).data)
 
     def delete(self, request, batch_id: int):
-        result = BatchService.delete_batch(batch_id)
+        result = BatchService.delete_batch(batch_id, actor=request.user)
         return success_response(result)
 
 
@@ -323,5 +327,5 @@ class BatchStatusView(ServiceAPIView):
     def patch(self, request, batch_id: int):
         serializer = BatchStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        batch = BatchService.update_batch_status(batch_id, serializer.validated_data["status"])
+        batch = BatchService.update_batch_status(batch_id, serializer.validated_data["status"], actor=request.user)
         return success_response(BatchOutputSerializer(batch).data)

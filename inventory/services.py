@@ -19,7 +19,7 @@ from inventory.expiry import (
     calc_expiry_progress,
     calc_expiry_status,
 )
-from inventory.models import Batch, BatchOperation, BatchQrCredential, Product, QrScanAuditLog
+from inventory.models import Batch, BatchOperation, BatchQrCredential, InventoryAuditLog, Product, QrScanAuditLog
 
 
 QR_CODE_PREFIX = "OB1"
@@ -70,6 +70,20 @@ def _obj_value(obj, field: str, default=None):
     if isinstance(obj, dict):
         return obj.get(field, default)
     return getattr(obj, field, default)
+
+
+def _actor_id(actor) -> int | None:
+    return getattr(actor, "id", None)
+
+
+def _json_value(value):
+    if isinstance(value, Decimal):
+        return _format_decimal(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
 
 
 def _product_value(batch, field: str, default=None):
@@ -200,10 +214,26 @@ class ProductService:
             _raise_conflict("Unable to load product", exc)
 
     @staticmethod
-    def create_product(data: dict):
+    def _snapshot(product) -> dict:
+        return {
+            "id": _obj_value(product, "id"),
+            "barcode": _obj_value(product, "barcode"),
+            "product_name": _obj_value(product, "product_name"),
+            "shelf_life_days": _obj_value(product, "shelf_life_days"),
+            "location": _obj_value(product, "location"),
+            "category": _obj_value(product, "category"),
+            "unit": _obj_value(product, "unit"),
+            "manufacturer": _obj_value(product, "manufacturer"),
+            "created_at": _json_value(_obj_value(product, "created_at")),
+            "updated_at": _json_value(_obj_value(product, "updated_at")),
+        }
+
+    @staticmethod
+    def create_product(data: dict, *, actor=None):
         try:
             with transaction.atomic():
                 product = Product.objects.create(**data)
+                InventoryAuditService.record_product(product, action=InventoryAuditLog.ACTION_CREATE, actor=actor)
         except IntegrityError as exc:
             raise ConflictApiError("Barcode already exists") from exc
         except DatabaseError as exc:
@@ -212,7 +242,7 @@ class ProductService:
         return product
 
     @staticmethod
-    def update_product(product_id: int, data: dict):
+    def update_product(product_id: int, data: dict, *, actor=None):
         try:
             product = Product.objects.get(pk=product_id)
         except Product.DoesNotExist as exc:
@@ -224,6 +254,7 @@ class ProductService:
         try:
             with transaction.atomic():
                 product.save(update_fields=list(data.keys()))
+                InventoryAuditService.record_product(product, action=InventoryAuditLog.ACTION_UPDATE, actor=actor)
         except IntegrityError as exc:
             raise ConflictApiError("Barcode already exists") from exc
         except DatabaseError as exc:
@@ -233,7 +264,7 @@ class ProductService:
         return product
 
     @staticmethod
-    def delete_product(product_id: int):
+    def delete_product(product_id: int, *, actor=None):
         try:
             product = Product.objects.get(pk=product_id)
         except Product.DoesNotExist as exc:
@@ -242,6 +273,7 @@ class ProductService:
         deleted_id = product.id
         try:
             with transaction.atomic():
+                InventoryAuditService.record_product(product, action=InventoryAuditLog.ACTION_DELETE, actor=actor)
                 product.delete()
         except IntegrityError as exc:
             _raise_conflict("Unable to delete product", exc)
@@ -258,6 +290,40 @@ class ProductService:
             return list(queryset.order_by("category").values_list("category", flat=True).distinct())
         except DatabaseError as exc:
             _raise_conflict("Unable to list categories", exc)
+
+
+class InventoryAuditService:
+    @staticmethod
+    def record(*, resource_type: str, resource_id, action: str, actor, snapshot: dict) -> None:
+        if actor is None:
+            return
+        InventoryAuditLog.objects.create(
+            resource_type=resource_type,
+            resource_id=str(resource_id),
+            action=action,
+            actor=actor,
+            snapshot=snapshot,
+        )
+
+    @classmethod
+    def record_product(cls, product, *, action: str, actor) -> None:
+        cls.record(
+            resource_type=InventoryAuditLog.RESOURCE_PRODUCT,
+            resource_id=_obj_value(product, "id"),
+            action=action,
+            actor=actor,
+            snapshot=ProductService._snapshot(product),
+        )
+
+    @classmethod
+    def record_batch(cls, batch, *, action: str, actor) -> None:
+        cls.record(
+            resource_type=InventoryAuditLog.RESOURCE_BATCH,
+            resource_id=_obj_value(batch, "id"),
+            action=action,
+            actor=actor,
+            snapshot=BatchService._snapshot(batch),
+        )
 
 
 class DashboardService:
@@ -500,8 +566,22 @@ class BatchService:
     def _generate_batch_code() -> str:
         return f"BATCH-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8]}"
 
+    @staticmethod
+    def _snapshot(batch) -> dict:
+        return {
+            "id": _obj_value(batch, "id"),
+            "product_id": _obj_value(batch, "product_id", _obj_value(_obj_value(batch, "product"), "id")),
+            "batch_code": _obj_value(batch, "batch_code"),
+            "quantity": _json_value(_obj_value(batch, "quantity")),
+            "received_at": _json_value(_obj_value(batch, "received_at")),
+            "manufacture_date": _json_value(_obj_value(batch, "manufacture_date")),
+            "expire_date": _json_value(_obj_value(batch, "expire_date")),
+            "status": _obj_value(batch, "status"),
+            "remarks": _obj_value(batch, "remarks"),
+        }
+
     @classmethod
-    def create_batch(cls, data: dict):
+    def create_batch(cls, data: dict, *, actor=None):
         try:
             product = Product.objects.get(pk=data["product_id"])
         except Product.DoesNotExist as exc:
@@ -526,6 +606,7 @@ class BatchService:
             with transaction.atomic():
                 batch = Batch.objects.create(**payload)
                 QrCredentialService.issue_for_batch(batch)
+                InventoryAuditService.record_batch(batch, action=InventoryAuditLog.ACTION_CREATE, actor=actor)
         except IntegrityError as exc:
             if cls._is_stale_primary_key_sequence_error(exc):
                 try:
@@ -533,6 +614,7 @@ class BatchService:
                         cls._sync_batch_id_sequence()
                         batch = Batch.objects.create(**payload)
                         QrCredentialService.issue_for_batch(batch)
+                        InventoryAuditService.record_batch(batch, action=InventoryAuditLog.ACTION_CREATE, actor=actor)
                 except IntegrityError as retry_exc:
                     raise ConflictApiError("Unable to create batch") from retry_exc
                 except DatabaseError as retry_exc:
@@ -554,7 +636,7 @@ class BatchService:
             _raise_conflict("Unable to load batch", exc)
 
     @classmethod
-    def update_batch(cls, batch_id: int, data: dict):
+    def update_batch(cls, batch_id: int, data: dict, *, actor=None, action: str = InventoryAuditLog.ACTION_UPDATE):
         batch = cls.get_batch(batch_id)
         update_data = dict(data)
 
@@ -564,6 +646,7 @@ class BatchService:
         try:
             with transaction.atomic():
                 batch.save(update_fields=list(update_data.keys()))
+                InventoryAuditService.record_batch(batch, action=action, actor=actor)
         except IntegrityError as exc:
             raise ConflictApiError("Unable to update batch") from exc
         except DatabaseError as exc:
@@ -571,15 +654,21 @@ class BatchService:
         return batch
 
     @classmethod
-    def update_batch_status(cls, batch_id: int, status: str):
-        return cls.update_batch(batch_id, {"status": status})
+    def update_batch_status(cls, batch_id: int, status: str, *, actor=None):
+        return cls.update_batch(
+            batch_id,
+            {"status": status},
+            actor=actor,
+            action=InventoryAuditLog.ACTION_STATUS_UPDATE,
+        )
 
     @classmethod
-    def delete_batch(cls, batch_id: int):
+    def delete_batch(cls, batch_id: int, *, actor=None):
         batch = cls.get_batch(batch_id)
         deleted_id = batch.id
         try:
             with transaction.atomic():
+                InventoryAuditService.record_batch(batch, action=InventoryAuditLog.ACTION_DELETE, actor=actor)
                 batch.delete()
         except IntegrityError as exc:
             _raise_conflict("Unable to delete batch", exc)
@@ -791,6 +880,7 @@ class QrScanService:
             device_id=data.get("device_id"),
             client_scan_id=data.get("client_scan_id"),
             scanner_user=context.get("scanner_user"),
+            scanner_user_account_id=context.get("scanner_user_id"),
             scanned_at_client=data.get("scanned_at"),
             scanned_at_server=timezone.now(),
             ip_address=context.get("ip_address"),
@@ -972,7 +1062,7 @@ class BatchOperationService:
     }
 
     @classmethod
-    def create_operation(cls, batch_id: int, data: dict):
+    def create_operation(cls, batch_id: int, data: dict, *, actor=None):
         try:
             with transaction.atomic():
                 batch = Batch.objects.select_for_update().get(pk=batch_id)
@@ -998,6 +1088,7 @@ class BatchOperationService:
                     quantity=quantity,
                     quantity_after=quantity_after,
                     remarks=data.get("remarks"),
+                    operator=actor,
                 )
         except Batch.DoesNotExist as exc:
             raise NotFoundApiError(f"Batch {batch_id} not found") from exc
@@ -1010,7 +1101,7 @@ class BatchOperationService:
         return operation, batch
 
     @classmethod
-    def revert_operation(cls, *, batch_id: int, operation_id: int, data: dict):
+    def revert_operation(cls, *, batch_id: int, operation_id: int, data: dict, actor=None):
         try:
             with transaction.atomic():
                 original_operation = BatchOperation.objects.select_for_update().get(pk=operation_id, batch_id=batch_id)
@@ -1042,6 +1133,7 @@ class BatchOperationService:
                     quantity=original_operation.quantity,
                     quantity_after=quantity_after,
                     remarks=data.get("remarks"),
+                    operator=actor,
                 )
         except BatchOperation.DoesNotExist as exc:
             raise NotFoundApiError(f"Batch operation {operation_id} not found") from exc

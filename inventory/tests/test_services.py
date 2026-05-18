@@ -9,7 +9,7 @@ from django.db import DatabaseError, IntegrityError
 from django.test import SimpleTestCase, override_settings
 
 from common.exceptions import ConflictApiError, NotFoundApiError
-from inventory.models import Batch, Product
+from inventory.models import Batch, InventoryAuditLog, Product
 from inventory.expiry import calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
 from inventory.services import (
     AnalyticsService,
@@ -118,6 +118,37 @@ class ProductServiceTests(SimpleTestCase):
         with self.assertRaises(ConflictApiError):
             ProductService.get_product(1)
 
+    @patch("inventory.services.InventoryAuditLog.objects.create")
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.Product.objects.get")
+    def test_delete_product_records_actor_and_snapshot_before_delete(self, mock_get, mock_atomic, mock_audit_create):
+        mock_atomic.return_value.__enter__.return_value = None
+        actor = Mock(id=123)
+        product = Mock(
+            id=7,
+            barcode="123456",
+            product_name="Milk",
+            shelf_life_days=12,
+            location="A-01",
+            category="drink",
+            unit="box",
+            manufacturer="Factory",
+            created_at=None,
+            updated_at=None,
+        )
+        mock_get.return_value = product
+
+        result = ProductService.delete_product(7, actor=actor)
+
+        self.assertEqual(result, {"id": 7})
+        mock_audit_create.assert_called_once()
+        self.assertEqual(mock_audit_create.call_args.kwargs["resource_type"], InventoryAuditLog.RESOURCE_PRODUCT)
+        self.assertEqual(mock_audit_create.call_args.kwargs["resource_id"], "7")
+        self.assertEqual(mock_audit_create.call_args.kwargs["action"], InventoryAuditLog.ACTION_DELETE)
+        self.assertIs(mock_audit_create.call_args.kwargs["actor"], actor)
+        self.assertEqual(mock_audit_create.call_args.kwargs["snapshot"]["barcode"], "123456")
+        product.delete.assert_called_once()
+
 
 class BatchServiceTests(SimpleTestCase):
     @patch("inventory.services.QrCredentialService.issue_for_batch")
@@ -197,6 +228,34 @@ class BatchServiceTests(SimpleTestCase):
 
         with self.assertRaises(ConflictApiError):
             BatchService.get_batch(1)
+
+    @patch("inventory.services.InventoryAuditLog.objects.create")
+    @patch("inventory.services.transaction.atomic")
+    @patch.object(BatchService, "get_batch")
+    def test_delete_batch_records_actor_and_snapshot_before_delete(self, mock_get_batch, mock_atomic, mock_audit_create):
+        mock_atomic.return_value.__enter__.return_value = None
+        actor = Mock(id=123)
+        batch = fake_batch(
+            3,
+            status="opened",
+            quantity=Decimal("8.50"),
+            manufacture_date=date(2026, 4, 1),
+            expire_date=date(2026, 5, 1),
+        )
+        batch.delete = Mock()
+        mock_get_batch.return_value = batch
+
+        result = BatchService.delete_batch(3, actor=actor)
+
+        self.assertEqual(result, {"id": 3})
+        mock_audit_create.assert_called_once()
+        self.assertEqual(mock_audit_create.call_args.kwargs["resource_type"], InventoryAuditLog.RESOURCE_BATCH)
+        self.assertEqual(mock_audit_create.call_args.kwargs["resource_id"], "3")
+        self.assertEqual(mock_audit_create.call_args.kwargs["action"], InventoryAuditLog.ACTION_DELETE)
+        self.assertIs(mock_audit_create.call_args.kwargs["actor"], actor)
+        self.assertEqual(mock_audit_create.call_args.kwargs["snapshot"]["batch_code"], "BATCH-003")
+        self.assertEqual(mock_audit_create.call_args.kwargs["snapshot"]["quantity"], "8.50")
+        batch.delete.assert_called_once()
 
     @patch("inventory.services.timezone.localdate")
     @patch("inventory.services.Batch.objects")
@@ -471,13 +530,14 @@ class QrScanServiceTests(SimpleTestCase):
 
         result = QrScanService.scan_qr(
             {"qr": "bad", "source": "mobile_camera"},
-            {"ip_address": "127.0.0.1", "user_agent": "api-test"},
+            {"ip_address": "127.0.0.1", "user_agent": "api-test", "scanner_user_id": 123},
         )
 
         self.assertEqual(result["status"], "invalid")
         self.assertEqual(result["message"], "二维码格式错误")
         self.assertEqual(mock_create_audit.call_args.kwargs["raw_qr"], "bad")
         self.assertEqual(mock_create_audit.call_args.kwargs["ip_address"], "127.0.0.1")
+        self.assertEqual(mock_create_audit.call_args.kwargs["scanner_user_account_id"], 123)
         self.assertEqual(audit.result_status, "invalid")
         self.assertEqual(audit.failure_reason, "invalid_format")
         audit.save.assert_called_once()
@@ -603,8 +663,30 @@ class BatchOperationServiceTests(SimpleTestCase):
             quantity=Decimal("2.00"),
             quantity_after=Decimal("10.50"),
             remarks="restock",
+            operator=None,
         )
         operation.refresh_from_db.assert_called_once_with(fields=["created_at"])
+
+    @patch("inventory.services.transaction.atomic")
+    @patch("inventory.services.BatchOperation.objects.create")
+    @patch("inventory.services.Batch.objects.select_for_update")
+    def test_create_operation_records_operator(self, mock_select_for_update, mock_operation_create, mock_atomic):
+        mock_atomic.return_value.__enter__.return_value = None
+        actor = Mock(id=123)
+        batch = Mock(id=3, quantity=Decimal("8.50"), status="opened")
+        mock_select_for_update.return_value.get.return_value = batch
+        mock_operation_create.return_value = Mock()
+
+        BatchOperationService.create_operation(
+            3,
+            {
+                "operation_type": "loss",
+                "quantity": Decimal("2.00"),
+            },
+            actor=actor,
+        )
+
+        self.assertIs(mock_operation_create.call_args.kwargs["operator"], actor)
 
     @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.BatchOperation.objects.create")
@@ -794,6 +876,7 @@ class BatchOperationServiceTests(SimpleTestCase):
             quantity=Decimal("2.00"),
             quantity_after=Decimal("6.50"),
             remarks="undo mistake",
+            operator=None,
         )
         reversal_operation.refresh_from_db.assert_called_once_with(fields=["created_at"])
 
@@ -891,6 +974,34 @@ class BatchOperationServiceTests(SimpleTestCase):
             BatchOperationService.revert_operation(batch_id=3, operation_id=7, data={})
 
         batch.save.assert_not_called()
+
+
+class BackfillInventoryActorsCommandTests(SimpleTestCase):
+    @patch("inventory.management.commands.backfill_inventory_actors.QrScanAuditLog.objects.filter")
+    @patch("inventory.management.commands.backfill_inventory_actors.BatchOperation.objects.filter")
+    @patch("inventory.management.commands.backfill_inventory_actors.get_user_model")
+    def test_backfill_inventory_actors_updates_missing_actor_fields(
+        self,
+        mock_get_user_model,
+        mock_batch_operation_filter,
+        mock_qr_scan_filter,
+    ):
+        from inventory.management.commands.backfill_inventory_actors import Command
+
+        user = Mock(username="admin")
+        user_model = Mock()
+        user_model.objects.get.return_value = user
+        mock_get_user_model.return_value = user_model
+        mock_batch_operation_filter.return_value.update.return_value = 2
+        mock_qr_scan_filter.return_value.update.return_value = 3
+
+        Command().handle(username="admin")
+
+        user_model.objects.get.assert_called_once_with(username="admin")
+        mock_batch_operation_filter.assert_called_once_with(operator__isnull=True)
+        mock_batch_operation_filter.return_value.update.assert_called_once_with(operator=user)
+        mock_qr_scan_filter.assert_called_once_with(scanner_user_account__isnull=True)
+        mock_qr_scan_filter.return_value.update.assert_called_once_with(scanner_user_account=user)
 
 
 def fake_batch(

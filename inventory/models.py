@@ -1,5 +1,7 @@
+from django.conf import settings
 from django.db import models
 from django.db.models.functions import Now
+from django.utils import timezone
 
 
 class Product(models.Model):
@@ -51,6 +53,14 @@ class BatchOperation(models.Model):
     quantity_after = models.DecimalField(max_digits=12, decimal_places=2)
     remarks = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(blank=True, db_default=Now())
+    operator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.DO_NOTHING,
+        related_name="batch_operations",
+        db_column="operator_id",
+        blank=True,
+        null=True,
+    )
 
     class Meta:
         managed = False
@@ -58,6 +68,7 @@ class BatchOperation(models.Model):
         indexes = [
             models.Index(fields=["batch", "-created_at", "-id"], name="batch_ops_batch_created_idx"),
             models.Index(fields=["operation_type"], name="batch_operations_type_idx"),
+            models.Index(fields=["operator"], name="batch_ops_operator_idx"),
         ]
         constraints = [
             models.UniqueConstraint(fields=["reversed_operation"], name="batch_operations_reversed_operation_uniq"),
@@ -98,6 +109,14 @@ class QrScanAuditLog(models.Model):
     device_id = models.CharField(max_length=255, blank=True, null=True)
     client_scan_id = models.CharField(max_length=255, blank=True, null=True)
     scanner_user = models.CharField(max_length=255, blank=True, null=True)
+    scanner_user_account = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.DO_NOTHING,
+        related_name="qr_scan_audit_logs",
+        db_column="scanner_user_id",
+        blank=True,
+        null=True,
+    )
     scanned_at_client = models.DateTimeField(blank=True, null=True)
     scanned_at_server = models.DateTimeField(blank=True, db_default=Now())
     ip_address = models.GenericIPAddressField(blank=True, null=True)
@@ -113,4 +132,29 @@ class QrScanAuditLog(models.Model):
             models.Index(fields=["batch", "-scanned_at_server"], name="qr_audit_batch_scan_idx"),
             models.Index(fields=["source", "device_id", "client_scan_id"], name="qr_audit_client_scan_idx"),
             models.Index(fields=["result_status"], name="qr_scan_audit_logs_status_idx"),
+            models.Index(fields=["scanner_user_account"], name="qr_audit_scanner_idx"),
+        ]
+
+
+class InventoryAuditLog(models.Model):
+    RESOURCE_PRODUCT = "product"
+    RESOURCE_BATCH = "batch"
+    ACTION_CREATE = "create"
+    ACTION_UPDATE = "update"
+    ACTION_DELETE = "delete"
+    ACTION_STATUS_UPDATE = "status_update"
+
+    resource_type = models.CharField(max_length=50)
+    resource_id = models.CharField(max_length=64)
+    action = models.CharField(max_length=50)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.DO_NOTHING, related_name="inventory_audit_logs")
+    snapshot = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "inventory_audit_logs"
+        indexes = [
+            models.Index(fields=["resource_type", "resource_id", "-created_at"], name="inv_audit_resource_idx"),
+            models.Index(fields=["actor", "-created_at"], name="inv_audit_actor_idx"),
+            models.Index(fields=["action"], name="inv_audit_action_idx"),
         ]

@@ -13,7 +13,7 @@ from common.exceptions import ConflictApiError, NotFoundApiError
 class InventoryApiTests(SimpleTestCase):
     def setUp(self):
         self.client = APIClient()
-        self.user = User(username="api-test")
+        self.user = User(id=123, username="api-test")
         self.client.force_authenticate(user=self.user)
 
     def test_homepage_renders(self):
@@ -194,6 +194,8 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json(), {"code": 4091, "message": "conflict", "data": None})
+        mock_create_product.assert_called_once()
+        self.assertIs(mock_create_product.call_args.kwargs["actor"], self.user)
 
     @patch("inventory.views.ProductService.update_product")
     def test_patch_product_returns_not_found_shape(self, mock_update_product):
@@ -203,6 +205,7 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"code": 4041, "message": "not_found", "data": None})
+        mock_update_product.assert_called_once_with(99, {"product_name": "New"}, actor=self.user)
 
     @patch("inventory.views.ProductService.delete_product")
     def test_delete_product_returns_success_payload(self, mock_delete_product):
@@ -212,6 +215,7 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"code": 0, "message": "success", "data": {"id": 7}})
+        mock_delete_product.assert_called_once_with(7, actor=self.user)
 
     @patch("inventory.views.ProductService.list_categories")
     def test_list_categories_returns_data_array(self, mock_list_categories):
@@ -389,6 +393,8 @@ class InventoryApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["code"], 0)
         self.assertEqual(response.json()["data"]["remarks"], "updated")
+        mock_update_batch.assert_called_once()
+        self.assertIs(mock_update_batch.call_args.kwargs["actor"], self.user)
 
     def test_patch_batch_rejects_direct_quantity_update(self):
         response = self.client.patch("/api/batches/3", {"quantity": "9.50"}, format="json")
@@ -422,6 +428,7 @@ class InventoryApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["code"], 0)
         self.assertEqual(response.json()["data"]["status"], "used_up")
+        mock_update_batch_status.assert_called_once_with(3, "used_up", actor=self.user)
 
     @patch("inventory.views.BatchService.delete_batch")
     def test_delete_batch_returns_success_payload(self, mock_delete_batch):
@@ -431,6 +438,7 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"code": 0, "message": "success", "data": {"id": 3}})
+        mock_delete_batch.assert_called_once_with(3, actor=self.user)
 
     @patch("inventory.views.BatchService.list_expiry_alerts")
     def test_expiry_alerts_default_query_returns_standard_shape(self, mock_list_expiry_alerts):
@@ -567,6 +575,7 @@ class InventoryApiTests(SimpleTestCase):
         self.assertIsNotNone(scan_payload["scanned_at"])
         self.assertEqual(mock_scan_qr.call_args.args[1]["ip_address"], "127.0.0.1")
         self.assertEqual(mock_scan_qr.call_args.args[1]["user_agent"], "api-test")
+        self.assertEqual(mock_scan_qr.call_args.args[1]["scanner_user_id"], 123)
 
     def test_qr_scan_rejects_invalid_source(self):
         response = self.client.post(
@@ -622,6 +631,7 @@ class InventoryApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["items"][1]["status"], "invalid")
         mock_scan_bulk.assert_called_once()
+        self.assertEqual(mock_scan_bulk.call_args.args[1]["scanner_user_id"], 123)
 
     @patch("inventory.views.BatchService.create_batch")
     def test_create_batch_translates_product_not_found(self, mock_create_batch):
@@ -639,6 +649,8 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"code": 4041, "message": "not_found", "data": None})
+        mock_create_batch.assert_called_once()
+        self.assertIs(mock_create_batch.call_args.kwargs["actor"], self.user)
 
     @patch("inventory.views.BatchOperationService.create_operation")
     def test_create_batch_operation_returns_operation_and_batch_summary(self, mock_create_operation):
@@ -696,6 +708,7 @@ class InventoryApiTests(SimpleTestCase):
         mock_create_operation.assert_called_once()
         self.assertEqual(mock_create_operation.call_args.args[0], 3)
         self.assertEqual(mock_create_operation.call_args.args[1]["quantity"], Decimal("2.00"))
+        self.assertIs(mock_create_operation.call_args.kwargs["actor"], self.user)
 
     @patch("inventory.views.BatchOperationService.list_operations")
     def test_list_batch_operations_returns_paginated_history(self, mock_list_operations):
@@ -784,6 +797,7 @@ class InventoryApiTests(SimpleTestCase):
             batch_id=3,
             operation_id=7,
             data={"remarks": "undo loss"},
+            actor=self.user,
         )
 
     @patch("inventory.views.BatchOperationService.revert_operation")
@@ -794,6 +808,7 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json(), {"code": 4091, "message": "conflict", "data": None})
+        mock_revert_operation.assert_called_once_with(batch_id=3, operation_id=7, data={}, actor=self.user)
 
     def test_create_batch_operation_rejects_invalid_operation_type(self):
         response = self.client.post(
@@ -836,6 +851,8 @@ class InventoryApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json(), {"code": 4091, "message": "conflict", "data": None})
+        mock_create_operation.assert_called_once()
+        self.assertIs(mock_create_operation.call_args.kwargs["actor"], self.user)
 
     def test_validation_error_returns_business_code_and_stable_message(self):
         response = self.client.post(
