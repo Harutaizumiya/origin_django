@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
@@ -24,18 +25,15 @@ class AuthApiTests(TestCase):
             last_name="User",
         )
 
-    def _login(self) -> str:
+    def _login(self):
         response = self.client.post(
             "/api/auth/login",
             {"username": "operator", "password": "correct-password"},
             format="json",
         )
         self.assertEqual(response.status_code, 200)
-        return response.json()["data"]["token"]
-
-    @staticmethod
-    def _auth_header(token: str) -> dict:
-        return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
+        self.assertIn(settings.AUTH_TOKEN_COOKIE_NAME, response.cookies)
+        return response
 
     def test_accounts_app_imports(self):
         self.assertEqual(AccountsConfig.name, "accounts")
@@ -58,12 +56,18 @@ class AuthApiTests(TestCase):
         payload = response.json()
         self.assertEqual(payload["code"], 0)
         data = payload["data"]
-        self.assertEqual(data["token_type"], "Bearer")
-        self.assertEqual(data["expires_in"], 28800)
-        self.assertEqual(data["user"]["username"], "operator")
-        self.assertEqual(data["user"]["email"], "operator@example.com")
-        self.assertEqual(data["user"]["permissions"], ["products_read"])
-        self.assertNotEqual(AuthToken.objects.get().token_hash, data["token"])
+        self.assertEqual(data["username"], "operator")
+        self.assertEqual(data["email"], "operator@example.com")
+        self.assertEqual(data["permissions"], ["products_read"])
+        self.assertNotIn("token", data)
+        self.assertNotIn("token_type", data)
+        cookie = response.cookies[settings.AUTH_TOKEN_COOKIE_NAME]
+        self.assertTrue(cookie["httponly"])
+        self.assertTrue(cookie["secure"])
+        self.assertEqual(cookie["samesite"], "Lax")
+        self.assertEqual(cookie["path"], "/api")
+        self.assertEqual(int(cookie["max-age"]), 28800)
+        self.assertNotEqual(AuthToken.objects.get().token_hash, cookie.value)
 
     def test_login_with_remember_me_returns_three_day_token(self):
         before_login = timezone.now()
@@ -76,7 +80,9 @@ class AuthApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
-        self.assertEqual(data["expires_in"], 259200)
+        self.assertEqual(data["username"], "operator")
+        cookie = response.cookies[settings.AUTH_TOKEN_COOKIE_NAME]
+        self.assertEqual(int(cookie["max-age"]), 259200)
         token = AuthToken.objects.get()
         self.assertGreaterEqual(token.expires_at, before_login + timedelta(days=3) - timedelta(seconds=5))
         self.assertLessEqual(token.expires_at, timezone.now() + timedelta(days=3) + timedelta(seconds=5))
@@ -94,9 +100,9 @@ class AuthApiTests(TestCase):
     def test_me_returns_current_user(self):
         permission = PermissionService.permission_queryset_for_codes(["products_read"]).get()
         self.user.user_permissions.add(permission)
-        token = self._login()
+        self._login()
 
-        response = self.client.get("/api/auth/me", **self._auth_header(token))
+        response = self.client.get("/api/auth/me")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["username"], "operator")
@@ -104,13 +110,14 @@ class AuthApiTests(TestCase):
         self.assertEqual(response.json()["data"]["permissions"], ["products_read"])
 
     def test_logout_revokes_current_token(self):
-        token = self._login()
+        self._login()
 
-        logout_response = self.client.post("/api/auth/logout", {}, format="json", **self._auth_header(token))
-        me_response = self.client.get("/api/auth/me", **self._auth_header(token))
+        logout_response = self.client.post("/api/auth/logout", {}, format="json")
+        me_response = self.client.get("/api/auth/me")
 
         self.assertEqual(logout_response.status_code, 200)
         self.assertEqual(logout_response.json()["data"], {"revoked": True})
+        self.assertEqual(logout_response.cookies[settings.AUTH_TOKEN_COOKIE_NAME]["max-age"], 0)
         self.assertIsNotNone(AuthToken.objects.get().revoked_at)
         self.assertEqual(me_response.status_code, 401)
         self.assertEqual(me_response.json(), {"code": 4011, "message": "unauthenticated", "data": None})
@@ -123,11 +130,79 @@ class AuthApiTests(TestCase):
             issued_at=timezone.now() - timedelta(hours=9),
             expires_at=timezone.now() - timedelta(hours=1),
         )
+        self.client.cookies[settings.AUTH_TOKEN_COOKIE_NAME] = token
 
-        response = self.client.get("/api/auth/me", **self._auth_header(token))
+        response = self.client.get("/api/auth/me")
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json(), {"code": 4011, "message": "unauthenticated", "data": None})
+
+    def test_bearer_header_no_longer_authenticates(self):
+        token = "bearer-token"
+        AuthToken.objects.create(
+            user=self.user,
+            token_hash=AuthTokenService.hash_token(token),
+            issued_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        response = self.client.get("/api/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"code": 4011, "message": "unauthenticated", "data": None})
+
+    def test_csrf_endpoint_sets_readable_csrf_cookie(self):
+        response = self.client.get("/api/auth/csrf")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("csrf_token", response.json()["data"])
+        self.assertIn(settings.CSRF_COOKIE_NAME, response.cookies)
+        self.assertFalse(response.cookies[settings.CSRF_COOKIE_NAME]["httponly"])
+
+    def test_login_requires_csrf_when_csrf_checks_are_enforced(self):
+        client = APIClient(enforce_csrf_checks=True)
+
+        response = client.post(
+            "/api/auth/login",
+            {"username": "operator", "password": "correct-password"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(), {"code": 4031, "message": "forbidden", "data": None})
+
+    def test_login_with_csrf_sets_auth_cookie(self):
+        client = APIClient(enforce_csrf_checks=True)
+        client.get("/api/auth/csrf")
+        csrf_token = client.cookies[settings.CSRF_COOKIE_NAME].value
+
+        response = client.post(
+            "/api/auth/login",
+            {"username": "operator", "password": "correct-password"},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(settings.AUTH_TOKEN_COOKIE_NAME, response.cookies)
+
+    def test_state_change_with_auth_cookie_requires_csrf_header(self):
+        client = APIClient(enforce_csrf_checks=True)
+        client.get("/api/auth/csrf")
+        csrf_token = client.cookies[settings.CSRF_COOKIE_NAME].value
+        login_response = client.post(
+            "/api/auth/login",
+            {"username": "operator", "password": "correct-password"},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(login_response.status_code, 200)
+
+        logout_response = client.post("/api/auth/logout", {}, format="json")
+
+        self.assertEqual(logout_response.status_code, 403)
+        self.assertEqual(logout_response.json(), {"code": 4031, "message": "forbidden", "data": None})
+        self.assertIsNone(AuthToken.objects.get().revoked_at)
 
 
 class PermissionManagementApiTests(TestCase):

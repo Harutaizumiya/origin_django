@@ -11,10 +11,13 @@
 ## 认证说明
 
 - 当前除首页 `/` 和认证接口外，业务 API 均要求登录。
-- 统一使用请求头：`Authorization: Bearer <token>`。
-- token 为不含业务含义的 opaque 字符串；客户端不得解析 token 内容。
-- 登录 token 默认 8 小时过期，`expires_in = 28800`；登录请求传 `remember_me = true` 时延长为 3 天，`expires_in = 259200`。暂不提供 refresh token。
-- `POST /auth/logout` 只吊销当前请求携带的 token；多设备登录允许多个未过期 token 并存。
+- 认证凭证由后端写入 HttpOnly cookie：`origin_auth_token`。
+- cookie 中的 token 为不含业务含义的 opaque 字符串；前端不得读取或解析 token 内容。
+- 登录 token 默认 8 小时过期；登录请求传 `remember_me = true` 时延长为 3 天。暂不提供 refresh token。
+- 认证 cookie 属性：`HttpOnly; Secure; SameSite=Lax; Path=/api`，`Max-Age` 与 token 有效期一致。
+- 前端请求 API 必须使用 cookie 凭证，例如 `fetch(..., { credentials: "include" })`。
+- `POST /auth/logout` 吊销当前 cookie 对应 token，并由后端清除认证 cookie；多设备登录允许多个未过期 token 并存。
+- 所有 `POST` / `PUT` / `PATCH` / `DELETE` 请求必须带 `X-CSRFToken`，值来自 `csrftoken` cookie 或 `GET /auth/csrf` 响应。
 - 商品、批次、库存操作和扫码审计会记录当前登录用户；当前响应体暂不返回操作者字段。
 - 业务 API 使用组件级权限控制；`is_superuser=true` 自动拥有全部权限。
 - 超级管理员可通过 `/auth/permissions`、`/auth/roles`、`/auth/users` 配置角色、权限和用户授权。
@@ -129,15 +132,11 @@
 | `name` | string | 角色名称 |
 | `permissions` | string[] | 角色拥有的权限码 |
 
-### AuthLoginResult
+### CsrfTokenResult
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `token` | string | Bearer token 明文，只在登录响应返回 |
-| `token_type` | string | 固定为 `Bearer` |
-| `expires_in` | integer | token 有效秒数；默认 `28800`，`remember_me=true` 时为 `259200` |
-| `expires_at` | string | token 到期时间，ISO 8601 时间点 |
-| `user` | AuthUser | 当前登录用户 |
+| `csrf_token` | string | CSRF token；前端状态变更请求需放入 `X-CSRFToken` |
 
 ### Product
 
@@ -357,9 +356,30 @@
 
 ## 认证接口
 
+### GET `/auth/csrf`
+
+获取 CSRF token，并设置可由前端读取的 `csrftoken` cookie。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "csrf_token": "..."
+  }
+}
+```
+
+调用说明：
+- 登录前先调用该接口。
+- 后续所有状态变更请求带 `X-CSRFToken: <csrftoken>`。
+- 请求仍需使用 `credentials: "include"`，以便浏览器携带 cookie。
+
 ### POST `/auth/login`
 
-使用 Django 用户名和密码登录，签发 Bearer token。默认有效期 8 小时；勾选“记住我”时有效期为 3 天。
+使用 Django 用户名和密码登录。成功后后端设置 `origin_auth_token` HttpOnly cookie，响应体只返回当前用户。
 
 请求体：
 
@@ -372,22 +392,30 @@
 ```
 
 字段说明：
-- `remember_me`：可选，默认 `false`；为 `true` 时本次 token 延长到 3 天。
+- `remember_me`：可选，默认 `false`；为 `true` 时本次 token 和 cookie 延长到 3 天，否则为 8 小时。
+
+请求头：
+- 必须带 `X-CSRFToken`。
 
 成功响应：
-- `data`：`AuthLoginResult`
+- `data`：`AuthUser`
+
+响应 Cookie：
+- `origin_auth_token=<opaque-token>; HttpOnly; Secure; SameSite=Lax; Path=/api`
 
 常见错误：
 - `400 / 4001 / validation_error`
 - `401 / 4011 / unauthenticated`
+- `403 / 4031 / forbidden`
 - `409 / 4091 / conflict`
 
 ### POST `/auth/logout`
 
-吊销当前请求携带的 Bearer token。
+吊销当前认证 cookie 对应 token，并清除认证 cookie。
 
 认证：
-- 必须携带 `Authorization: Bearer <token>`
+- 必须携带认证 cookie。
+- 必须带 `X-CSRFToken`。
 
 成功响应：
 
@@ -403,13 +431,14 @@
 
 常见错误：
 - `401 / 4011 / unauthenticated`
+- `403 / 4031 / forbidden`
 
 ### GET `/auth/me`
 
 查询当前登录用户。
 
 认证：
-- 必须携带 `Authorization: Bearer <token>`
+- 必须携带认证 cookie。
 
 成功响应：
 - `data`：`AuthUser`

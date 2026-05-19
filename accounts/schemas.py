@@ -18,16 +18,12 @@ class AuthUserSerializer(serializers.Serializer):
     permissions = serializers.ListField(child=serializers.CharField())
 
 
-class AuthLoginResultSerializer(serializers.Serializer):
-    token = serializers.CharField()
-    token_type = serializers.CharField()
-    expires_in = serializers.IntegerField()
-    expires_at = serializers.DateTimeField()
-    user = AuthUserSerializer()
-
-
 class LogoutResultSerializer(serializers.Serializer):
     revoked = serializers.BooleanField()
+
+
+class CsrfTokenSerializer(serializers.Serializer):
+    csrf_token = serializers.CharField()
 
 
 class PermissionSerializer(serializers.Serializer):

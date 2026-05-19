@@ -1,10 +1,12 @@
+from django.conf import settings
+from django.middleware.csrf import get_token
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from accounts.permissions import SuperAdminPermission
 from accounts.schemas import (
     AuthAdminUserSerializer,
-    AuthLoginResultSerializer,
     AuthUserSerializer,
+    CsrfTokenSerializer,
     LoginSerializer,
     LogoutResultSerializer,
     PermissionGroupSerializer,
@@ -20,6 +22,35 @@ from common.responses import success_response
 from common.views import ServiceAPIView
 
 
+def set_auth_cookie(response, *, token: str, max_age: int):
+    response.set_cookie(
+        settings.AUTH_TOKEN_COOKIE_NAME,
+        token,
+        max_age=max_age,
+        path=settings.AUTH_TOKEN_COOKIE_PATH,
+        secure=settings.AUTH_TOKEN_COOKIE_SECURE,
+        httponly=True,
+        samesite=settings.AUTH_TOKEN_COOKIE_SAMESITE,
+    )
+
+
+def clear_auth_cookie(response):
+    response.delete_cookie(
+        settings.AUTH_TOKEN_COOKIE_NAME,
+        path=settings.AUTH_TOKEN_COOKIE_PATH,
+        samesite=settings.AUTH_TOKEN_COOKIE_SAMESITE,
+    )
+
+
+class CsrfTokenView(ServiceAPIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        output = CsrfTokenSerializer({"csrf_token": get_token(request)})
+        return success_response(output.data)
+
+
 class LoginView(ServiceAPIView):
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -33,15 +64,19 @@ class LoginView(ServiceAPIView):
             password=serializer.validated_data["password"],
             remember_me=serializer.validated_data["remember_me"],
         )
-        output = AuthLoginResultSerializer(result)
-        return success_response(output.data)
+        output = AuthUserSerializer(result["user"])
+        response = success_response(output.data)
+        set_auth_cookie(response, token=result["token"], max_age=result["expires_in"])
+        return response
 
 
 class LogoutView(ServiceAPIView):
     def post(self, request):
         result = AuthTokenService.logout(getattr(request, "auth", None))
         output = LogoutResultSerializer(result)
-        return success_response(output.data)
+        response = success_response(output.data)
+        clear_auth_cookie(response)
+        return response
 
 
 class MeView(ServiceAPIView):

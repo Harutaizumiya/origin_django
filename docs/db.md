@@ -13,6 +13,7 @@
 - 测试环境：执行测试时使用 SQLite 文件 `test.sqlite3`
 - 时区：`Asia/Shanghai`
 - 认证 token pepper：通过 `AUTH_TOKEN_PEPPER` 配置读取，未配置时回退到 `SECRET_KEY`
+- API 认证 token 存入 HttpOnly cookie `origin_auth_token`；CSRF 使用可读 cookie `csrftoken`
 - 组件级权限复用 Django `auth_group`、`auth_permission`、`auth_user_groups`、
   `auth_user_user_permissions`，不新增自定义角色关系表
 
@@ -160,8 +161,8 @@ Django 默认用户模型。
 
 ## 表：accounts_auth_tokens
 
-API Bearer token 表，由 `accounts` app migration 管理。明文 token 只在登录响应返回；
-数据库只保存 `sha256(token + AUTH_TOKEN_PEPPER)`。
+API opaque token 表，由 `accounts` app migration 管理。明文 token 只写入
+HttpOnly cookie，不在响应体返回；数据库只保存 `sha256(token + AUTH_TOKEN_PEPPER)`。
 
 | 字段 | 数据库类型 | 空值 | 默认值 | 约束/索引 | 说明 |
 | --- | --- | --- | --- | --- | --- |
@@ -174,10 +175,12 @@ API Bearer token 表，由 `accounts` app migration 管理。明文 token 只在
 
 ### 业务约定
 
-- token 格式为 `Authorization: Bearer <token>`。
+- token 格式为 `origin_auth_token=<token>` HttpOnly cookie。
+- 认证 cookie 属性为 `HttpOnly; Secure; SameSite=Lax; Path=/api`，`Max-Age` 与 token 有效期一致。
+- 状态变更接口要求 `X-CSRFToken`，值来自 `csrftoken` cookie 或 `/api/auth/csrf` 响应。
 - token 为 opaque 字符串，不包含可解析业务声明。
 - 每个 token 默认 8 小时过期；登录请求传 `remember_me=true` 时延长为 3 天。不提供 refresh token。
-- 登出只吊销当前 token；同一用户可并存多个未过期 token。
+- 登出只吊销当前 cookie 对应 token，并清除认证 cookie；同一用户可并存多个未过期 token。
 
 ## 表：product
 

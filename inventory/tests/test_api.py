@@ -1,13 +1,16 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from accounts.services import PermissionService
+from accounts.models import AuthToken
+from accounts.services import AuthTokenService, PermissionService
 from common.exceptions import ConflictApiError, NotFoundApiError
 
 
@@ -881,6 +884,16 @@ class InventoryPermissionTests(TestCase):
             if hasattr(self.user, cache_name):
                 delattr(self.user, cache_name)
 
+    def _set_auth_cookie(self, client):
+        token = "inventory-cookie-token"
+        AuthToken.objects.create(
+            user=self.user,
+            token_hash=AuthTokenService.hash_token(token),
+            issued_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        client.cookies[settings.AUTH_TOKEN_COOKIE_NAME] = token
+
     @patch("inventory.views.ProductService.list_products")
     def test_business_api_without_component_permission_returns_forbidden(self, mock_list_products):
         response = self.client.get("/api/products")
@@ -986,3 +999,24 @@ class InventoryPermissionTests(TestCase):
 
         self.assertEqual(allowed_response.status_code, 200)
         mock_scan_qr.assert_called_once()
+
+    @patch("inventory.views.ProductService.create_product")
+    def test_state_change_with_auth_cookie_requires_csrf_before_business_service(self, mock_create_product):
+        client = APIClient(enforce_csrf_checks=True)
+        self._grant("products_create")
+        self._set_auth_cookie(client)
+
+        response = client.post(
+            "/api/products",
+            {
+                "barcode": "123456",
+                "product_name": "Milk",
+                "shelf_life_days": 12,
+                "manufacturer": "Factory",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(), {"code": 4031, "message": "forbidden", "data": None})
+        mock_create_product.assert_not_called()

@@ -23,7 +23,6 @@ from common.exceptions import ConflictApiError, NotFoundApiError, Unauthenticate
 
 
 class AuthTokenService:
-    token_type = "Bearer"
     expires_in_seconds = 8 * 60 * 60
     remember_me_expires_in_seconds = 3 * 24 * 60 * 60
 
@@ -71,7 +70,6 @@ class AuthTokenService:
 
         return {
             "token": token,
-            "token_type": cls.token_type,
             "expires_in": expires_in,
             "expires_at": expires_at,
             "user": cls.serialize_user(user),
