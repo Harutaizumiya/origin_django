@@ -31,6 +31,7 @@ class LoginView(ServiceAPIView):
             request=request,
             username=serializer.validated_data["username"],
             password=serializer.validated_data["password"],
+            remember_me=serializer.validated_data["remember_me"],
         )
         output = AuthLoginResultSerializer(result)
         return success_response(output.data)

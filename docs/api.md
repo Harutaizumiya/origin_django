@@ -13,7 +13,7 @@
 - 当前除首页 `/` 和认证接口外，业务 API 均要求登录。
 - 统一使用请求头：`Authorization: Bearer <token>`。
 - token 为不含业务含义的 opaque 字符串；客户端不得解析 token 内容。
-- 登录 token 固定 8 小时过期，`expires_in = 28800`，暂不提供 refresh token。
+- 登录 token 默认 8 小时过期，`expires_in = 28800`；登录请求传 `remember_me = true` 时延长为 3 天，`expires_in = 259200`。暂不提供 refresh token。
 - `POST /auth/logout` 只吊销当前请求携带的 token；多设备登录允许多个未过期 token 并存。
 - 商品、批次、库存操作和扫码审计会记录当前登录用户；当前响应体暂不返回操作者字段。
 - 业务 API 使用组件级权限控制；`is_superuser=true` 自动拥有全部权限。
@@ -135,7 +135,7 @@
 | --- | --- | --- |
 | `token` | string | Bearer token 明文，只在登录响应返回 |
 | `token_type` | string | 固定为 `Bearer` |
-| `expires_in` | integer | 固定为 `28800` 秒 |
+| `expires_in` | integer | token 有效秒数；默认 `28800`，`remember_me=true` 时为 `259200` |
 | `expires_at` | string | token 到期时间，ISO 8601 时间点 |
 | `user` | AuthUser | 当前登录用户 |
 
@@ -359,16 +359,20 @@
 
 ### POST `/auth/login`
 
-使用 Django 用户名和密码登录，签发 8 小时 Bearer token。
+使用 Django 用户名和密码登录，签发 Bearer token。默认有效期 8 小时；勾选“记住我”时有效期为 3 天。
 
 请求体：
 
 ```json
 {
   "username": "operator",
-  "password": "password"
+  "password": "password",
+  "remember_me": true
 }
 ```
+
+字段说明：
+- `remember_me`：可选，默认 `false`；为 `true` 时本次 token 延长到 3 天。
 
 成功响应：
 - `data`：`AuthLoginResult`

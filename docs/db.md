@@ -169,14 +169,14 @@ API Bearer token 表，由 `accounts` app migration 管理。明文 token 只在
 | `user_id` | `integer` | 否 | 无 | 外键/索引 | 关联 Django 用户 ID |
 | `token_hash` | `varchar(64)` | 否 | 无 | 唯一 | 登录 token 的 SHA-256 哈希 |
 | `issued_at` | `timestamp with time zone` | 否 | 应用层当前时间 | - | 签发时间 |
-| `expires_at` | `timestamp with time zone` | 否 | 无 | 索引 | 到期时间，固定为签发后 8 小时 |
+| `expires_at` | `timestamp with time zone` | 否 | 无 | 索引 | 到期时间；默认签发后 8 小时，`remember_me=true` 时为 3 天 |
 | `revoked_at` | `timestamp with time zone` | 是 | 无 | 索引 | 吊销时间，`null` 表示未吊销 |
 
 ### 业务约定
 
 - token 格式为 `Authorization: Bearer <token>`。
 - token 为 opaque 字符串，不包含可解析业务声明。
-- 每个 token 固定 8 小时过期，不提供 refresh token。
+- 每个 token 默认 8 小时过期；登录请求传 `remember_me=true` 时延长为 3 天。不提供 refresh token。
 - 登出只吊销当前 token；同一用户可并存多个未过期 token。
 
 ## 表：product

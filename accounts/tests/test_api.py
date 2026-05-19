@@ -65,6 +65,22 @@ class AuthApiTests(TestCase):
         self.assertEqual(data["user"]["permissions"], ["products_read"])
         self.assertNotEqual(AuthToken.objects.get().token_hash, data["token"])
 
+    def test_login_with_remember_me_returns_three_day_token(self):
+        before_login = timezone.now()
+
+        response = self.client.post(
+            "/api/auth/login",
+            {"username": "operator", "password": "correct-password", "remember_me": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["expires_in"], 259200)
+        token = AuthToken.objects.get()
+        self.assertGreaterEqual(token.expires_at, before_login + timedelta(days=3) - timedelta(seconds=5))
+        self.assertLessEqual(token.expires_at, timezone.now() + timedelta(days=3) + timedelta(seconds=5))
+
     def test_login_rejects_bad_password(self):
         response = self.client.post(
             "/api/auth/login",
