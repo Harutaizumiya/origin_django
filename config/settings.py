@@ -102,6 +102,14 @@ AUTH_TOKEN_COOKIE_SECURE = bool_from_env("AUTH_TOKEN_COOKIE_SECURE", True)
 CSRF_COOKIE_SECURE = bool_from_env("CSRF_COOKIE_SECURE", AUTH_TOKEN_COOKIE_SECURE)
 CSRF_COOKIE_SAMESITE = os.environ.get("CSRF_COOKIE_SAMESITE", "Lax")
 CSRF_COOKIE_HTTPONLY = False
+PERFORMANCE_CACHE_TIMEOUT = int(os.environ.get("PERFORMANCE_CACHE_TIMEOUT", "30"))
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "origin-django-default",
+    }
+}
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [

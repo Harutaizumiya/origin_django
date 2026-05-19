@@ -1,3 +1,4 @@
+from common.cache_utils import CACHE_GROUP_INVENTORY_READ, CACHE_GROUP_PRODUCT_CATEGORIES, cached_value
 from common.responses import success_response
 from common.views import ServiceAPIView
 from inventory.schemas import (
@@ -80,9 +81,12 @@ class DashboardOverviewView(ServiceAPIView):
     permission_map = {"GET": "dashboard_read"}
 
     def get(self, request):
-        overview = DashboardService.get_overview()
-        serializer = DashboardOverviewSerializer(overview)
-        return success_response(serializer.data)
+        payload = cached_value(
+            CACHE_GROUP_INVENTORY_READ,
+            "dashboard:overview",
+            lambda: DashboardOverviewSerializer(DashboardService.get_overview()).data,
+        )
+        return success_response(payload)
 
 
 class AnalyticsSummaryView(ServiceAPIView):
@@ -91,9 +95,13 @@ class AnalyticsSummaryView(ServiceAPIView):
     def get(self, request):
         query = AnalyticsSummaryQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
-        summary = AnalyticsService.get_summary(range_value=query.validated_data["range"])
-        serializer = AnalyticsSummarySerializer(summary)
-        return success_response(serializer.data)
+        range_value = query.validated_data["range"]
+        payload = cached_value(
+            CACHE_GROUP_INVENTORY_READ,
+            f"analytics:summary:{range_value}",
+            lambda: AnalyticsSummarySerializer(AnalyticsService.get_summary(range_value=range_value)).data,
+        )
+        return success_response(payload)
 
 
 class ProductCollectionView(ServiceAPIView):
@@ -156,8 +164,13 @@ class ProductCategoriesView(ServiceAPIView):
     def get(self, request):
         query = CategoryQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
-        categories = ProductService.list_categories(query.validated_data.get("search"))
-        return success_response({"items": categories, "pagination": None})
+        search = query.validated_data.get("search") or ""
+        payload = cached_value(
+            CACHE_GROUP_PRODUCT_CATEGORIES,
+            f"products:categories:{search}",
+            lambda: {"items": ProductService.list_categories(search), "pagination": None},
+        )
+        return success_response(payload)
 
 
 class ProductBatchCollectionView(ServiceAPIView):

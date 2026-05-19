@@ -11,6 +11,11 @@ from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
+from common.cache_utils import (
+    CACHE_GROUP_INVENTORY_READ,
+    CACHE_GROUP_PRODUCT_CATEGORIES,
+    invalidate_cache_groups,
+)
 from common.exceptions import ConflictApiError, NotFoundApiError
 from inventory.expiry import (
     ALERT_EXPIRY_STATUSES,
@@ -239,6 +244,7 @@ class ProductService:
         except DatabaseError as exc:
             _raise_conflict("Unable to create product", exc)
         product.refresh_from_db(fields=["created_at", "updated_at"])
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ, CACHE_GROUP_PRODUCT_CATEGORIES)
         return product
 
     @staticmethod
@@ -261,6 +267,7 @@ class ProductService:
             _raise_conflict("Unable to update product", exc)
 
         product.refresh_from_db(fields=["updated_at"])
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ, CACHE_GROUP_PRODUCT_CATEGORIES)
         return product
 
     @staticmethod
@@ -279,6 +286,7 @@ class ProductService:
             _raise_conflict("Unable to delete product", exc)
         except DatabaseError as exc:
             _raise_conflict("Unable to delete product", exc)
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ, CACHE_GROUP_PRODUCT_CATEGORIES)
         return {"id": deleted_id}
 
     @staticmethod
@@ -331,6 +339,23 @@ class DashboardService:
     def _active_batches() -> list:
         return list(
             Batch.objects.select_related("product")
+            .only(
+                "id",
+                "batch_code",
+                "quantity",
+                "received_at",
+                "manufacture_date",
+                "expire_date",
+                "status",
+                "remarks",
+                "product__id",
+                "product__barcode",
+                "product__product_name",
+                "product__unit",
+                "product__manufacturer",
+                "product__category",
+                "product__shelf_life_days",
+            )
             .filter(quantity__gt=Decimal("0"))
             .exclude(status="used_up")
         )
@@ -419,6 +444,16 @@ class AnalyticsService:
         reversal_queryset = BatchOperation.objects.filter(reversed_operation_id=OuterRef("pk"))
         return list(
             BatchOperation.objects.select_related("batch__product")
+            .only(
+                "id",
+                "operation_type",
+                "quantity",
+                "created_at",
+                "reversed_operation_id",
+                "batch__id",
+                "batch__product__id",
+                "batch__product__category",
+            )
             .filter(created_at__gte=start_at, created_at__lt=end_at)
             .annotate(is_reverted=Exists(reversal_queryset))
             .filter(reversed_operation_id__isnull=True, is_reverted=False)
@@ -624,6 +659,7 @@ class BatchService:
         except DatabaseError as exc:
             _raise_conflict("Unable to create batch", exc)
         batch.refresh_from_db(fields=["received_at"])
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ)
         return batch
 
     @staticmethod
@@ -651,6 +687,7 @@ class BatchService:
             raise ConflictApiError("Unable to update batch") from exc
         except DatabaseError as exc:
             _raise_conflict("Unable to update batch", exc)
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ)
         return batch
 
     @classmethod
@@ -674,6 +711,7 @@ class BatchService:
             _raise_conflict("Unable to delete batch", exc)
         except DatabaseError as exc:
             _raise_conflict("Unable to delete batch", exc)
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ)
         return {"id": deleted_id}
 
     @staticmethod
@@ -727,7 +765,28 @@ class BatchService:
         try:
             today = timezone.localdate()
             latest_expire_date = today + timedelta(days=days_lte)
-            queryset = Batch.objects.select_related("product").exclude(expire_date__isnull=True)
+            queryset = (
+                Batch.objects.select_related("product")
+                .only(
+                    "id",
+                    "batch_code",
+                    "quantity",
+                    "received_at",
+                    "manufacture_date",
+                    "expire_date",
+                    "status",
+                    "remarks",
+                    "product__id",
+                    "product__barcode",
+                    "product__product_name",
+                    "product__unit",
+                    "product__manufacturer",
+                    "product__category",
+                    "product__location",
+                    "product__shelf_life_days",
+                )
+                .exclude(expire_date__isnull=True)
+            )
 
             if product_id:
                 queryset = queryset.filter(product_id=product_id)
@@ -745,24 +804,27 @@ class BatchService:
 
             batches = list(queryset)
             allowed_statuses = (expiry_status,) if expiry_status else ALERT_EXPIRY_STATUSES
-            filtered_batches = [
-                batch
-                for batch in batches
-                if calc_expiry_status(batch.manufacture_date, batch.product.shelf_life_days, today) in allowed_statuses
-            ]
+            filtered_batches = []
+            for batch in batches:
+                status_value = calc_expiry_status(batch.manufacture_date, batch.product.shelf_life_days, today)
+                if status_value not in allowed_statuses:
+                    continue
+                days_until_expiry = calc_days_until_expiry(batch.expire_date, today)
+                expiry_progress = calc_expiry_progress(batch.manufacture_date, batch.product.shelf_life_days, today) or 0
+                filtered_batches.append((batch, days_until_expiry, expiry_progress))
 
             filtered_batches.sort(
-                key=lambda batch: (
-                    calc_days_until_expiry(batch.expire_date, today) is None,
-                    calc_days_until_expiry(batch.expire_date, today) or 0,
-                    -(calc_expiry_progress(batch.manufacture_date, batch.product.shelf_life_days, today) or 0),
-                    -batch.id,
+                key=lambda item: (
+                    item[1] is None,
+                    item[1] or 0,
+                    -item[2],
+                    -item[0].id,
                 )
             )
 
             total = len(filtered_batches)
             offset = (page - 1) * size
-            return filtered_batches[offset : offset + size], total
+            return [item[0] for item in filtered_batches[offset : offset + size]], total
         except DatabaseError as exc:
             _raise_conflict("Unable to list expiry alerts", exc)
 
@@ -1098,6 +1160,7 @@ class BatchOperationService:
             _raise_conflict("Unable to create batch operation", exc)
 
         operation.refresh_from_db(fields=["created_at"])
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ)
         return operation, batch
 
     @classmethod
@@ -1143,6 +1206,7 @@ class BatchOperationService:
             _raise_conflict("Unable to revert batch operation", exc)
 
         reversal_operation.refresh_from_db(fields=["created_at"])
+        invalidate_cache_groups(CACHE_GROUP_INVENTORY_READ)
         return reversal_operation, batch
 
     @classmethod

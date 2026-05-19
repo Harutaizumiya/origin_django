@@ -18,6 +18,7 @@ from accounts.schemas import (
     UserUpdateSerializer,
 )
 from accounts.services import AuthTokenService, PermissionService, RoleService, UserAdminService
+from common.cache_utils import CACHE_GROUP_AUTH_PERMISSIONS, CACHE_GROUP_AUTH_ROLES, cached_value
 from common.responses import success_response
 from common.views import ServiceAPIView
 
@@ -89,16 +90,27 @@ class PermissionCollectionView(ServiceAPIView):
     permission_classes = [IsAuthenticated, SuperAdminPermission]
 
     def get(self, request):
-        output = PermissionGroupSerializer(PermissionService.grouped_catalog(), many=True)
-        return success_response({"items": output.data, "pagination": None})
+        payload = cached_value(
+            CACHE_GROUP_AUTH_PERMISSIONS,
+            "permissions:catalog",
+            lambda: {
+                "items": PermissionGroupSerializer(PermissionService.grouped_catalog(), many=True).data,
+                "pagination": None,
+            },
+        )
+        return success_response(payload)
 
 
 class RoleCollectionView(ServiceAPIView):
     permission_classes = [IsAuthenticated, SuperAdminPermission]
 
     def get(self, request):
-        output = RoleOutputSerializer(RoleService.list_roles(), many=True)
-        return success_response({"items": output.data, "pagination": None})
+        payload = cached_value(
+            CACHE_GROUP_AUTH_ROLES,
+            "roles:list",
+            lambda: {"items": RoleOutputSerializer(RoleService.list_roles(), many=True).data, "pagination": None},
+        )
+        return success_response(payload)
 
     def post(self, request):
         serializer = RoleInputSerializer(data=request.data)

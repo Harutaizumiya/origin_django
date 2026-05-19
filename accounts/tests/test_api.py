@@ -1,6 +1,8 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.conf import settings
+from django.core.cache import cache
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
 from django.db import connection
@@ -17,6 +19,7 @@ from accounts.services import AuthTokenService, PermissionService
 @override_settings(AUTH_TOKEN_PEPPER="pepper")
 class AuthApiTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         PermissionService.sync_permissions()
         self.user = User.objects.create_user(
@@ -209,6 +212,7 @@ class AuthApiTests(TestCase):
 
 class PermissionManagementApiTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         PermissionService.sync_permissions()
         self.superuser = User.objects.create_superuser(
@@ -233,8 +237,10 @@ class PermissionManagementApiTests(TestCase):
         self._as_superuser()
 
         response = self.client.get("/api/auth/permissions")
+        cached_response = self.client.get("/api/auth/permissions")
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(cached_response.status_code, 200)
         codes = [
             permission["code"]
             for group in response.json()["data"]["items"]
@@ -242,6 +248,31 @@ class PermissionManagementApiTests(TestCase):
         ]
         self.assertIn("products_read", codes)
         self.assertIn("batch_operations_loss", codes)
+
+    @patch("accounts.views.PermissionService.grouped_catalog")
+    def test_permission_catalog_is_cached(self, mock_grouped_catalog):
+        self._as_superuser()
+        mock_grouped_catalog.return_value = [
+            {
+                "component": "products",
+                "permissions": [
+                    {
+                        "code": "products_read",
+                        "name": "查看商品",
+                        "component": "products",
+                        "action": "read",
+                        "description": "查看商品",
+                    }
+                ],
+            }
+        ]
+
+        first_response = self.client.get("/api/auth/permissions")
+        second_response = self.client.get("/api/auth/permissions")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        mock_grouped_catalog.assert_called_once_with()
 
     def test_superuser_can_create_role_and_assign_to_user(self):
         self._as_superuser()
@@ -304,6 +335,24 @@ class PermissionManagementApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["data"]["items"]), 8)
         self.assertLessEqual(len(queries), 3)
+
+    @patch("accounts.views.RoleService.list_roles")
+    def test_roles_list_is_cached_and_role_write_invalidates_it(self, mock_list_roles):
+        self._as_superuser()
+        mock_list_roles.return_value = []
+
+        first_response = self.client.get("/api/auth/roles")
+        second_response = self.client.get("/api/auth/roles")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        mock_list_roles.assert_called_once_with()
+
+        self.client.post("/api/auth/roles", {"name": "cache-reset", "permission_codes": []}, format="json")
+        third_response = self.client.get("/api/auth/roles")
+
+        self.assertEqual(third_response.status_code, 200)
+        self.assertEqual(mock_list_roles.call_count, 2)
 
     def test_role_delete_rejects_assigned_role(self):
         self._as_superuser()

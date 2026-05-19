@@ -20,6 +20,7 @@ from accounts.permissions import (
     PERMISSION_CONTENT_TYPE_MODEL,
     catalog_as_dicts,
 )
+from common.cache_utils import CACHE_GROUP_AUTH_PERMISSIONS, CACHE_GROUP_AUTH_ROLES, invalidate_cache_groups
 from common.exceptions import ConflictApiError, NotFoundApiError, UnauthenticatedApiError, ValidationApiError
 
 
@@ -209,6 +210,7 @@ class RoleService:
         group = Group.objects.create(name=name)
         permission_codes = data.get("permission_codes", [])
         group.permissions.set(PermissionService.permission_queryset_for_codes(permission_codes))
+        invalidate_cache_groups(CACHE_GROUP_AUTH_PERMISSIONS, CACHE_GROUP_AUTH_ROLES)
         return cls.serialize_role(group)
 
     @classmethod
@@ -222,6 +224,7 @@ class RoleService:
             group.save(update_fields=["name"])
         if "permission_codes" in data:
             group.permissions.set(PermissionService.permission_queryset_for_codes(data["permission_codes"]))
+        invalidate_cache_groups(CACHE_GROUP_AUTH_PERMISSIONS, CACHE_GROUP_AUTH_ROLES)
         return cls.serialize_role(group)
 
     @classmethod
@@ -232,6 +235,7 @@ class RoleService:
             raise ConflictApiError("Role is assigned to users")
         deleted_id = group.id
         group.delete()
+        invalidate_cache_groups(CACHE_GROUP_AUTH_PERMISSIONS, CACHE_GROUP_AUTH_ROLES)
         return {"id": deleted_id}
 
 
@@ -372,6 +376,7 @@ class UserAdminService:
             user.groups.set(cls._groups_for_ids(data["group_ids"]))
         if "permission_codes" in data:
             user.user_permissions.set(PermissionService.permission_queryset_for_codes(data["permission_codes"]))
+        invalidate_cache_groups(CACHE_GROUP_AUTH_PERMISSIONS, CACHE_GROUP_AUTH_ROLES)
         return cls.serialize_user(user)
 
     @classmethod
@@ -389,6 +394,8 @@ class UserAdminService:
             user.groups.set(cls._groups_for_ids(data["group_ids"]))
         if "permission_codes" in data:
             user.user_permissions.set(PermissionService.permission_queryset_for_codes(data["permission_codes"]))
+        if "group_ids" in data or "permission_codes" in data:
+            invalidate_cache_groups(CACHE_GROUP_AUTH_PERMISSIONS, CACHE_GROUP_AUTH_ROLES)
         return cls.serialize_user(user)
 
     @classmethod

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from django.db import DatabaseError, IntegrityError
 from django.test import SimpleTestCase, override_settings
 
+from common.cache_utils import CACHE_GROUP_INVENTORY_READ, CACHE_GROUP_PRODUCT_CATEGORIES
 from common.exceptions import ConflictApiError, NotFoundApiError
 from inventory.models import Batch, InventoryAuditLog, Product
 from inventory.expiry import calc_days_until_expiry, calc_expiry_progress, calc_expiry_status
@@ -63,9 +64,10 @@ class ProductServiceTests(SimpleTestCase):
         with self.assertRaises(ConflictApiError):
             ProductService.list_products(search=None, page=1, size=20)
 
+    @patch("inventory.services.invalidate_cache_groups")
     @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.Product.objects.create")
-    def test_create_product_refreshes_database_timestamps(self, mock_create, mock_atomic):
+    def test_create_product_refreshes_database_timestamps(self, mock_create, mock_atomic, mock_invalidate):
         mock_atomic.return_value.__enter__.return_value = None
         product = Mock()
         mock_create.return_value = product
@@ -81,6 +83,7 @@ class ProductServiceTests(SimpleTestCase):
 
         self.assertIs(result, product)
         product.refresh_from_db.assert_called_once_with(fields=["created_at", "updated_at"])
+        mock_invalidate.assert_called_once_with(CACHE_GROUP_INVENTORY_READ, CACHE_GROUP_PRODUCT_CATEGORIES)
 
     @patch("inventory.services.transaction.atomic")
     @patch("inventory.services.Product.objects.create")

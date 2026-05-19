@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.conf import settings
+from django.core.cache import cache
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
@@ -16,6 +17,7 @@ from common.exceptions import ConflictApiError, NotFoundApiError
 
 class InventoryApiTests(SimpleTestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         self.user = User(id=123, username="api-test", is_superuser=True)
         self.client.force_authenticate(user=self.user)
@@ -40,8 +42,10 @@ class InventoryApiTests(SimpleTestCase):
         }
 
         response = self.client.get("/api/dashboard/overview")
+        cached_response = self.client.get("/api/dashboard/overview")
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(cached_response.status_code, 200)
         self.assertEqual(response.json()["data"]["current_inventory_quantity"], "18.50")
         self.assertEqual(response.json()["data"]["near_expiry_batch_count"], 1)
         self.assertEqual(response.json()["data"]["expiry_trend_30d"][0]["quantity"], "8.50")
@@ -74,11 +78,47 @@ class InventoryApiTests(SimpleTestCase):
         }
 
         response = self.client.get("/api/analytics/summary", {"range": "6m"})
+        cached_response = self.client.get("/api/analytics/summary", {"range": "6m"})
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(cached_response.status_code, 200)
         self.assertEqual(response.json()["data"]["inventory_change_count"], 3)
         self.assertEqual(response.json()["data"]["current_month_loss_quantity"], "2.00")
         mock_get_summary.assert_called_once_with(range_value="6m")
+
+    @patch("inventory.views.AnalyticsService.get_summary")
+    def test_analytics_summary_cache_separates_ranges(self, mock_get_summary):
+        mock_get_summary.side_effect = [
+            {
+                "range": "1m",
+                "period": {"start": "2026-05-01", "end": "2026-05-13"},
+                "inventory_change_count": 1,
+                "current_month_loss_quantity": Decimal("1.00"),
+                "average_stock_age_days": None,
+                "monthly_inventory_loss_trend": [],
+                "category_operation_summary": [],
+                "high_risk_inventory_ranking": [],
+            },
+            {
+                "range": "3m",
+                "period": {"start": "2026-03-01", "end": "2026-05-13"},
+                "inventory_change_count": 3,
+                "current_month_loss_quantity": Decimal("2.00"),
+                "average_stock_age_days": None,
+                "monthly_inventory_loss_trend": [],
+                "category_operation_summary": [],
+                "high_risk_inventory_ranking": [],
+            },
+        ]
+
+        one_month_response = self.client.get("/api/analytics/summary", {"range": "1m"})
+        three_month_response = self.client.get("/api/analytics/summary", {"range": "3m"})
+
+        self.assertEqual(one_month_response.status_code, 200)
+        self.assertEqual(three_month_response.status_code, 200)
+        self.assertEqual(one_month_response.json()["data"]["range"], "1m")
+        self.assertEqual(three_month_response.json()["data"]["range"], "3m")
+        self.assertEqual(mock_get_summary.call_count, 2)
 
     def test_analytics_summary_rejects_invalid_range(self):
         response = self.client.get("/api/analytics/summary", {"range": "2y"})
@@ -226,8 +266,10 @@ class InventoryApiTests(SimpleTestCase):
         mock_list_categories.return_value = ["drink", "snack"]
 
         response = self.client.get("/api/products/categories")
+        cached_response = self.client.get("/api/products/categories")
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(cached_response.status_code, 200)
         self.assertEqual(
             response.json(),
             {
@@ -239,6 +281,7 @@ class InventoryApiTests(SimpleTestCase):
                 },
             },
         )
+        mock_list_categories.assert_called_once_with("")
 
     @patch("inventory.views.BatchService.list_batches")
     def test_list_batches_returns_standard_shape(self, mock_list_batches):
@@ -892,6 +935,7 @@ class InventoryApiTests(SimpleTestCase):
 
 class InventoryPermissionTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         PermissionService.sync_permissions()
         self.user = User.objects.create_user(username="permission-user", password="password")
