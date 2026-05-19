@@ -90,11 +90,15 @@ class AnalyticsSummaryQuerySerializer(serializers.Serializer):
 class BatchCreateSerializer(serializers.Serializer):
     product_id = serializers.IntegerField(min_value=1)
     batch_code = serializers.CharField(required=False, allow_blank=False)
-    quantity = serializers.DecimalField(max_digits=12, decimal_places=2)
     manufacture_date = serializers.DateField()
     expire_date = serializers.DateField(required=False, allow_null=True)
     status = serializers.CharField(required=False, allow_blank=False, default="unopened")
     remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        if "quantity" in self.initial_data:
+            raise serializers.ValidationError({"quantity": "Use batch operations to change quantity."})
+        return attrs
 
 
 class BatchUpdateSerializer(serializers.Serializer):
@@ -112,6 +116,11 @@ class BatchUpdateSerializer(serializers.Serializer):
 
 class BatchStatusUpdateSerializer(serializers.Serializer):
     status = serializers.CharField()
+
+    def validate_status(self, value):
+        if value == "used_up":
+            raise serializers.ValidationError("Use batch operations to mark inventory as used up.")
+        return value
 
 
 class BatchOperationCreateSerializer(serializers.Serializer):

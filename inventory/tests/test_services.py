@@ -166,7 +166,6 @@ class BatchServiceTests(SimpleTestCase):
         BatchService.create_batch(
             {
                 "product_id": 1,
-                "quantity": "5.00",
                 "manufacture_date": date(2026, 4, 21),
                 "status": "unopened",
                 "remarks": None,
@@ -176,6 +175,7 @@ class BatchServiceTests(SimpleTestCase):
         payload = mock_batch_create.call_args.kwargs
         self.assertEqual(payload["expire_date"], date(2026, 5, 21))
         self.assertEqual(payload["product"].id, 1)
+        self.assertEqual(payload["quantity"], Decimal("0.00"))
         mock_issue_qr.assert_called_once_with(batch)
         batch.refresh_from_db.assert_called_once_with(fields=["received_at"])
 
@@ -187,7 +187,6 @@ class BatchServiceTests(SimpleTestCase):
             BatchService.create_batch(
                 {
                     "product_id": 99,
-                    "quantity": "5.00",
                     "manufacture_date": date(2026, 4, 21),
                 }
             )
@@ -211,7 +210,6 @@ class BatchServiceTests(SimpleTestCase):
         batch = BatchService.create_batch(
             {
                 "product_id": 1,
-                "quantity": "5.00",
                 "manufacture_date": date(2026, 4, 21),
             }
         )

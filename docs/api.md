@@ -329,8 +329,8 @@
 | `products_update` | products | update | 更新商品 |
 | `products_delete` | products | delete | 删除商品 |
 | `batches_read` | batches | read | 批次列表、商品批次、批次详情、效期预警 |
-| `batches_create` | batches | create | 创建批次 |
-| `batches_update` | batches | update | 更新批次、更新批次状态 |
+| `batches_create` | batches | create | 创建批次主数据，不写入库存数量 |
+| `batches_update` | batches | update | 更新批次主数据、更新非库存状态 |
 | `batches_delete` | batches | delete | 删除批次 |
 | `batch_operations_read` | batch_operations | read | 查看批次库存操作记录 |
 | `batch_operations_add` | batch_operations | add | 创建 `operation_type=add` 入库操作 |
@@ -999,7 +999,6 @@
 ```json
 {
   "product_id": 14,
-  "quantity": "8.50",
   "manufacture_date": "2026-04-21",
   "expire_date": "2026-05-06",
   "status": "unopened",
@@ -1010,13 +1009,14 @@
 请求字段：
 - `product_id`：必填
 - `batch_code`：可选，不传时自动生成
-- `quantity`：必填，可传数字或字符串，响应始终为字符串
 - `manufacture_date`：必填，格式 `YYYY-MM-DD`
 - `expire_date`：可选，格式 `YYYY-MM-DD`；不传时按 `manufacture_date + product.shelf_life_days` 自动计算
 - `status`：可选，默认 `unopened`
 - `remarks`：可选，可为 `null` 或空字符串
 
 说明：
+- 批次创建只创建批次主数据，初始 `quantity` 固定为 `"0.00"`。
+- 入库、出库、报损和撤销必须通过 `batch_operations`，不能通过 `batches` 接口直接操作库存。
 - 创建批次时后端会自动签发一条二维码凭证，但本接口不返回二维码 token。
 - 标签打印应调用 `GET /batches/{batch_id}/label-payload` 获取专用打印载荷。
 - 后端会记录当前登录用户为本次批次创建操作的执行人。
@@ -1092,7 +1092,6 @@
 
 ```json
 {
-  "quantity": "9.50",
   "remarks": "updated"
 }
 ```
@@ -1107,6 +1106,7 @@
 说明：
 - 批次数量不能通过该接口直接更新；数量变更必须使用
   `POST /batches/{batch_id}/operations`。
+- `status = used_up` 由库存操作在数量归零时自动维护，不能通过 `batches` 接口直接设置。
 - 后端会记录当前登录用户为本次批次更新操作的执行人。
 
 成功响应：

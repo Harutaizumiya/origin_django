@@ -596,7 +596,7 @@ class BatchService:
         payload = {
             "product": product,
             "batch_code": data.get("batch_code") or cls._generate_batch_code(),
-            "quantity": data["quantity"],
+            "quantity": Decimal("0.00"),
             "manufacture_date": data["manufacture_date"],
             "expire_date": expire_date,
             "status": data.get("status", "unopened"),

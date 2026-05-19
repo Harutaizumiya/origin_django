@@ -146,8 +146,8 @@ Django 默认用户模型。
 | `products_update` | 更新商品 |
 | `products_delete` | 删除商品 |
 | `batches_read` | 查看批次 |
-| `batches_create` | 创建批次 |
-| `batches_update` | 更新批次和状态 |
+| `batches_create` | 创建批次主数据，不写入库存数量 |
+| `batches_update` | 更新批次主数据和非库存状态 |
 | `batches_delete` | 删除批次 |
 | `batch_operations_read` | 查看库存操作 |
 | `batch_operations_add` | 入库操作 |
@@ -237,7 +237,7 @@ HttpOnly cookie，不在响应体返回；数据库只保存 `sha256(token + AUT
 | `id` | `integer` | 否 | 自增 | 主键 | 批次 ID |
 | `product_id` | `bigint` | 否 | 无 | 外键 | 关联 `product.id` |
 | `batch_code` | `varchar(255)` | 否 | 应用层生成 | - | 批次号 |
-| `quantity` | `numeric(12,2)` | 是 | 无 | - | 数量 |
+| `quantity` | `numeric(12,2)` | 是 | 应用层创建为 `0.00` | - | 当前库存数量 |
 | `received_at` | `timestamp with time zone` | 否 | `NOW()` | - | 入库时间 |
 | `manufacture_date` | `date` | 是 | 无 | - | 生产日期，创建接口要求必填 |
 | `expire_date` | `date` | 是 | 应用层计算 | - | 到期日期 |
@@ -256,8 +256,11 @@ HttpOnly cookie，不在响应体返回；数据库只保存 `sha256(token + AUT
   - `used_up`
 - 批次列表默认按 `received_at` 倒序，再按 `id` 倒序排序。
 - 批次查询支持按 `product_id`、`status`、是否过期过滤。
-- 批次数量变更应通过 `batch_operations` 记录；业务接口不再允许直接 PATCH
-  `batches.quantity`。
+- 批次创建只创建主数据，初始库存数量固定为 `0.00`。
+- 批次数量变更必须通过 `batch_operations` 记录；业务接口不允许通过
+  `batches` 创建或更新请求直接写入 `batches.quantity`。
+- `status = used_up` 由库存操作在数量归零时自动维护，不允许通过 `batches`
+  状态接口直接设置。
 - 批次创建、更新、状态更新、删除会写入 `inventory_audit_logs`，记录当前登录用户和操作快照。
 
 ## 表：batch_operations
@@ -283,7 +286,8 @@ DDL 维护，Django model 设置为 `managed = False`。
 - `add` 增加对应批次 `quantity`；`loss` 与 `deduct` 扣减对应批次 `quantity`。
 - 扣减后数量不能小于 `0`，否则应用层返回 `409 / conflict`。
 - 写入操作记录与更新 `batches.quantity` 必须在同一事务内完成。
-- v1 不根据操作结果修改批次 `status`。
+- 当操作后数量为 `0` 时，应用层自动将批次 `status` 置为 `used_up`；当
+  `used_up` 批次重新入库后，应用层自动清空该状态。
 - 撤销操作通过创建一条反向操作记录实现，不删除原操作。
 - 新增和撤销操作会记录当前登录用户到 `operator_id`。
 - `reversed_operation_id` 对原操作唯一，保证每条操作最多只能被撤销一次。

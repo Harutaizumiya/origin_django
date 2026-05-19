@@ -406,6 +406,20 @@ class InventoryApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
 
+    def test_create_batch_rejects_direct_quantity_input(self):
+        response = self.client.post(
+            "/api/batches",
+            {
+                "product_id": 1,
+                "quantity": "10.00",
+                "manufacture_date": "2026-04-21",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
+
     @patch("inventory.views.BatchService.update_batch_status")
     def test_patch_batch_status_returns_standard_shape(self, mock_update_batch_status):
         mock_update_batch_status.return_value = {
@@ -416,7 +430,7 @@ class InventoryApiTests(SimpleTestCase):
             "received_at": None,
             "manufacture_date": "2026-04-21",
             "expire_date": "2026-05-06",
-            "status": "used_up",
+            "status": "opened",
             "remarks": "qa batch",
             "product": {
                 "id": 1,
@@ -427,12 +441,18 @@ class InventoryApiTests(SimpleTestCase):
             },
         }
 
-        response = self.client.patch("/api/batches/3/status", {"status": "used_up"}, format="json")
+        response = self.client.patch("/api/batches/3/status", {"status": "opened"}, format="json")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["code"], 0)
-        self.assertEqual(response.json()["data"]["status"], "used_up")
-        mock_update_batch_status.assert_called_once_with(3, "used_up", actor=self.user)
+        self.assertEqual(response.json()["data"]["status"], "opened")
+        mock_update_batch_status.assert_called_once_with(3, "opened", actor=self.user)
+
+    def test_patch_batch_status_rejects_used_up_direct_update(self):
+        response = self.client.patch("/api/batches/3/status", {"status": "used_up"}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"code": 4001, "message": "validation_error", "data": None})
 
     @patch("inventory.views.BatchService.delete_batch")
     def test_delete_batch_returns_success_payload(self, mock_delete_batch):
@@ -645,7 +665,6 @@ class InventoryApiTests(SimpleTestCase):
             "/api/batches",
             {
                 "product_id": 404,
-                "quantity": "10.00",
                 "manufacture_date": "2026-04-21",
             },
             format="json",
