@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
 from django.db import DatabaseError
+from django.db.models import Prefetch
 from django.db import transaction
 from django.utils import timezone
 
@@ -129,7 +130,6 @@ class PermissionService:
     @classmethod
     def permission_queryset_for_codes(cls, codes: list[str]):
         cls.validate_permission_codes(codes)
-        cls.sync_permissions()
         return Permission.objects.filter(
             content_type__app_label=PERMISSION_APP_LABEL,
             codename__in=codes,
@@ -162,13 +162,22 @@ class PermissionService:
 
 
 class RoleService:
+    @staticmethod
+    def component_permission_queryset():
+        return Permission.objects.filter(
+            content_type__app_label=PERMISSION_APP_LABEL,
+            codename__in=COMPONENT_PERMISSION_CODES,
+        )
+
     @classmethod
     def serialize_role(cls, group: Group) -> dict:
-        permissions = sorted(
-            permission.codename
-            for permission in group.permissions.filter(content_type__app_label=PERMISSION_APP_LABEL)
-            if permission.codename in COMPONENT_PERMISSION_CODES
-        )
+        prefetched_permissions = getattr(group, "component_permissions", None)
+        if prefetched_permissions is None:
+            prefetched_permissions = group.permissions.filter(
+                content_type__app_label=PERMISSION_APP_LABEL,
+                codename__in=COMPONENT_PERMISSION_CODES,
+            )
+        permissions = sorted(permission.codename for permission in prefetched_permissions)
         return {
             "id": group.id,
             "name": group.name,
@@ -177,13 +186,17 @@ class RoleService:
 
     @classmethod
     def list_roles(cls) -> list[dict]:
-        PermissionService.sync_permissions()
-        return [cls.serialize_role(group) for group in Group.objects.order_by("id").prefetch_related("permissions")]
+        groups = Group.objects.order_by("id").prefetch_related(
+            Prefetch("permissions", queryset=cls.component_permission_queryset(), to_attr="component_permissions")
+        )
+        return [cls.serialize_role(group) for group in groups]
 
     @classmethod
     def get_role(cls, role_id: int) -> Group:
         try:
-            return Group.objects.prefetch_related("permissions").get(pk=role_id)
+            return Group.objects.prefetch_related(
+                Prefetch("permissions", queryset=cls.component_permission_queryset(), to_attr="component_permissions")
+            ).get(pk=role_id)
         except Group.DoesNotExist as exc:
             raise NotFoundApiError(f"Role {role_id} not found") from exc
 
@@ -238,14 +251,28 @@ class UserAdminService:
 
     @classmethod
     def serialize_user(cls, user) -> dict:
-        groups = [
-            RoleService.serialize_role(group)
-            for group in user.groups.order_by("id").prefetch_related("permissions")
-        ]
-        direct_permissions = sorted(
-            permission.codename
-            for permission in user.user_permissions.filter(content_type__app_label=PERMISSION_APP_LABEL)
-            if permission.codename in COMPONENT_PERMISSION_CODES
+        group_objects = getattr(user, "component_groups", None)
+        if group_objects is None:
+            group_objects = user.groups.order_by("id").prefetch_related(
+                Prefetch(
+                    "permissions",
+                    queryset=RoleService.component_permission_queryset(),
+                    to_attr="component_permissions",
+                )
+            )
+        groups = [RoleService.serialize_role(group) for group in group_objects]
+
+        direct_permission_objects = getattr(user, "component_user_permissions", None)
+        if direct_permission_objects is None:
+            direct_permission_objects = user.user_permissions.filter(
+                content_type__app_label=PERMISSION_APP_LABEL,
+                codename__in=COMPONENT_PERMISSION_CODES,
+            )
+        direct_permissions = sorted(permission.codename for permission in direct_permission_objects)
+        effective_permissions = cls._effective_permission_codes(
+            user,
+            groups=groups,
+            direct_permissions=direct_permissions,
         )
         return {
             "id": user.id,
@@ -258,15 +285,42 @@ class UserAdminService:
             "is_superuser": user.is_superuser,
             "groups": groups,
             "direct_permissions": direct_permissions,
-            "effective_permissions": PermissionService.effective_permission_codes(user),
+            "effective_permissions": effective_permissions,
         }
+
+    @staticmethod
+    def _effective_permission_codes(user, *, groups: list[dict], direct_permissions: list[str]) -> list[str]:
+        if getattr(user, "is_superuser", False):
+            return sorted(COMPONENT_PERMISSION_CODES)
+        if not getattr(user, "is_active", True):
+            return []
+        group_permissions = {
+            permission
+            for group in groups
+            for permission in group["permissions"]
+        }
+        return sorted(group_permissions | set(direct_permissions))
 
     @classmethod
     def list_users(cls) -> list[dict]:
+        component_permissions = RoleService.component_permission_queryset()
         users = (
             cls._user_model()
             .objects.order_by("id")
-            .prefetch_related("groups__permissions", "user_permissions")
+            .prefetch_related(
+                Prefetch(
+                    "groups",
+                    queryset=Group.objects.order_by("id").prefetch_related(
+                        Prefetch("permissions", queryset=component_permissions, to_attr="component_permissions")
+                    ),
+                    to_attr="component_groups",
+                ),
+                Prefetch(
+                    "user_permissions",
+                    queryset=component_permissions,
+                    to_attr="component_user_permissions",
+                ),
+            )
         )
         return [cls.serialize_user(user) for user in users]
 
@@ -275,7 +329,24 @@ class UserAdminService:
         try:
             return (
                 cls._user_model()
-                .objects.prefetch_related("groups__permissions", "user_permissions")
+                .objects.prefetch_related(
+                    Prefetch(
+                        "groups",
+                        queryset=Group.objects.order_by("id").prefetch_related(
+                            Prefetch(
+                                "permissions",
+                                queryset=RoleService.component_permission_queryset(),
+                                to_attr="component_permissions",
+                            )
+                        ),
+                        to_attr="component_groups",
+                    ),
+                    Prefetch(
+                        "user_permissions",
+                        queryset=RoleService.component_permission_queryset(),
+                        to_attr="component_user_permissions",
+                    ),
+                )
                 .get(pk=user_id)
             )
         except cls._user_model().DoesNotExist as exc:

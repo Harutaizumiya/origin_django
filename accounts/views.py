@@ -89,7 +89,6 @@ class PermissionCollectionView(ServiceAPIView):
     permission_classes = [IsAuthenticated, SuperAdminPermission]
 
     def get(self, request):
-        PermissionService.sync_permissions()
         output = PermissionGroupSerializer(PermissionService.grouped_catalog(), many=True)
         return success_response({"items": output.data, "pagination": None})
 

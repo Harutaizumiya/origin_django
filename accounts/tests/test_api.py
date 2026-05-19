@@ -3,7 +3,9 @@ from datetime import timedelta
 from django.conf import settings
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -271,6 +273,37 @@ class PermissionManagementApiTests(TestCase):
             data["effective_permissions"],
             ["batch_operations_loss", "products_read", "qr_scans_create"],
         )
+
+    def test_users_list_uses_bounded_queries(self):
+        self._as_superuser()
+        permission = PermissionService.permission_queryset_for_codes(["products_read"]).get()
+        group = Group.objects.create(name="readers")
+        group.permissions.add(permission)
+        for index in range(8):
+            user = User.objects.create_user(username=f"worker-{index}", password="password")
+            user.groups.add(group)
+            user.user_permissions.add(permission)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get("/api/auth/users")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreaterEqual(len(response.json()["data"]["items"]), 10)
+        self.assertLessEqual(len(queries), 5)
+
+    def test_roles_list_uses_bounded_queries(self):
+        self._as_superuser()
+        permission = PermissionService.permission_queryset_for_codes(["products_read"]).get()
+        for index in range(8):
+            group = Group.objects.create(name=f"role-{index}")
+            group.permissions.add(permission)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get("/api/auth/roles")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["data"]["items"]), 8)
+        self.assertLessEqual(len(queries), 3)
 
     def test_role_delete_rejects_assigned_role(self):
         self._as_superuser()
